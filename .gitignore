@@ -1,0 +1,19 @@
+# Build artifacts
+plugin/build/
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/*.xcodeproj/xcuserdata/
+
+# Node
+web/node_modules/
+web/dist/
+web/.vite/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
