@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startTunnel } from './tunnel.js';
 import { transcodeToOpus } from './transcode.js';
+import { getStorage } from './storage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -110,6 +111,18 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
     // Continue without Opus — clients fall back to WAV.
   }
 
+  // Push to remote storage when configured. Local backend is a no-op
+  // (multer already wrote the WAV; ffmpeg already wrote the Opus).
+  try {
+    const storage = await getStorage();
+    if (storage.kind !== 'local') {
+      await storage.put(req.file.filename, wavPath, 'audio/wav');
+      if (opusFilename) await storage.put(opusFilename, opusPath, 'audio/ogg');
+    }
+  } catch (e) {
+    console.error('[earshot] storage put failed:', e.message);
+  }
+
   db.prepare(`
     INSERT INTO takes (id, project, project_id, filename, opus_filename,
                        duration_sec, bytes, created_at)
@@ -157,20 +170,29 @@ app.get('/projects/:id/takes', (req, res) => {
 // GET /takes/:id/audio
 // Default: Opus (12x smaller, near-instant start on mobile).
 // ?format=wav: original lossless WAV (for archival download, Pro feature).
-app.get('/takes/:id/audio', (req, res) => {
+// When remote storage exposes a public URL, redirect there (R2 free egress).
+app.get('/takes/:id/audio', async (req, res) => {
   const row = db.prepare(
     'SELECT filename, opus_filename FROM takes WHERE id = ?'
   ).get(req.params.id);
   if (!row) return res.status(404).end();
 
   const wantWav = req.query.format === 'wav';
-  const serveOpus = !wantWav && row.opus_filename;
+  const filename = !wantWav && row.opus_filename ? row.opus_filename : row.filename;
+  const isOpus = filename.endsWith('.opus');
 
-  const filename = serveOpus ? row.opus_filename : row.filename;
+  const storage = await getStorage();
+
+  // Remote storage (e.g. R2) with public URL: redirect so the client
+  // pulls directly from the CDN and we don't proxy any bytes.
+  const remoteUrl = storage.url(filename);
+  if (remoteUrl) return res.redirect(302, remoteUrl);
+
+  // Local storage path.
   const filePath = path.join(AUDIO_DIR, filename);
   if (!fs.existsSync(filePath)) {
-    // Opus missing but WAV exists — fall back gracefully.
-    if (serveOpus) {
+    // Opus missing but WAV exists — graceful fallback.
+    if (filename !== row.filename) {
       const wavFallback = path.join(AUDIO_DIR, row.filename);
       if (fs.existsSync(wavFallback)) {
         res.setHeader('Content-Type', 'audio/wav');
@@ -181,7 +203,7 @@ app.get('/takes/:id/audio', (req, res) => {
     return res.status(404).end();
   }
 
-  res.setHeader('Content-Type', serveOpus ? 'audio/ogg' : 'audio/wav');
+  res.setHeader('Content-Type', isOpus ? 'audio/ogg' : 'audio/wav');
   res.setHeader('Accept-Ranges', 'bytes');
   res.sendFile(filePath);
 });
@@ -221,8 +243,9 @@ async function backfillOpus() {
 }
 
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`[earshot] backend listening on http://localhost:${PORT}`);
+  await getStorage(); // logs which backend is in use
   tunnelStatus = startTunnel({
     port: PORT,
     onUrl: (url) => { tunnelStatus.publicUrl = url; tunnelStatus.state = 'running'; },

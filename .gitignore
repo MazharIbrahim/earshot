@@ -13,6 +13,13 @@ web/.vite/
 # macOS
 .DS_Store
 
+# Env files (R2/Supabase secrets)
+**/.env
+**/.env.local
+
+# Backend data (audio + sqlite)
+backend/data/
+
 # Editor
 .vscode/
 .idea/

@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiTake } from '../api';
 import { fmtDuration, fmtRelative, fmtBytes } from '../data';
 import { coverGradient } from '../cover';
 
 export function Project() {
   const { id } = useParams();
+  const [search] = useSearchParams();
+  const sharedTakeId = search.get('t');
   const [takes, setTakes] = useState<ApiTake[] | null>(null);
   const [selected, setSelected] = useState<ApiTake | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
@@ -20,8 +23,18 @@ export function Project() {
         if (cancelled) return;
         setTakes(t);
         setError(null);
-        // Auto-select the newest take on first load.
-        setSelected(s => s ?? t[0] ?? null);
+        // Priority for initial selection:
+        //   1. ?t=<takeId> from a share link
+        //   2. whatever's already selected
+        //   3. newest take
+        setSelected(s => {
+          if (s) return s;
+          if (sharedTakeId) {
+            const shared = t.find(x => x.id === sharedTakeId);
+            if (shared) return shared;
+          }
+          return t[0] ?? null;
+        });
       } catch (e: any) {
         if (!cancelled) setError(e.message || 'failed to load');
       }
@@ -29,7 +42,22 @@ export function Project() {
     load();
     const t = setInterval(load, 5000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [id]);
+  }, [id, sharedTakeId]);
+
+  const shareCurrent = async () => {
+    if (!selected || !id) return;
+    const url = `${window.location.origin}/p/${id}?t=${selected.id}`;
+    try {
+      // Web Share API (mobile native sheet) preferred; clipboard otherwise.
+      if (navigator.share) {
+        await navigator.share({ title: selected.project, url });
+      } else {
+        await navigator.clipboard.writeText(url);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1600);
+      }
+    } catch { /* user cancelled / share unsupported */ }
+  };
 
   if (error) return <p className="empty">{error}</p>;
   if (!takes) return <p className="empty">loading…</p>;
@@ -55,12 +83,29 @@ export function Project() {
               ref={audioRef}
               src={api.audioUrl(selected.id)}
               controls
+              autoPlay={!!sharedTakeId} // share-link recipients hear it immediately
               style={{ width: '100%', marginTop: 12, accentColor: 'var(--accent)' }}
               preload="metadata"
             />
             <p className="meta" style={{ textAlign: 'center', marginTop: 10 }}>
               {fmtDuration(selected.durationSec)} · {fmtBytes(selected.bytes)} · {fmtRelative(selected.createdAt)}
             </p>
+            <button
+              onClick={shareCurrent}
+              style={{
+                display: 'block',
+                margin: '12px auto 0',
+                padding: '10px 16px',
+                background: 'transparent',
+                border: '1px solid var(--stroke)',
+                color: copied ? 'var(--accent)' : 'var(--text)',
+                borderRadius: 8,
+                fontFamily: 'var(--mono)',
+                fontSize: 12,
+              }}
+            >
+              {copied ? 'link copied' : 'share this take'}
+            </button>
           </>
         ) : (
           <p className="meta" style={{ textAlign: 'center' }}>
