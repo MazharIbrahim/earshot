@@ -118,6 +118,19 @@ export function Project() {
     } catch {/* swallow; UI will reflect on next poll */}
   };
 
+  const deleteTake = async (t: ApiTake) => {
+    const label = t.note || new Date(t.createdAt).toLocaleString();
+    if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
+    try {
+      await api.remove(t.id);
+      setTakes(prev => prev?.filter(x => x.id !== t.id) ?? prev);
+      if (takeA?.id === t.id) setTakeA(null);
+      if (takeB?.id === t.id) { setTakeB(null); setActive('A'); }
+    } catch (e: any) {
+      setError(e.message || 'delete failed');
+    }
+  };
+
   // ---- render -------------------------------------------------------------
   if (error) return <p className="empty">{error}</p>;
   if (!takes) return <p className="empty">loading…</p>;
@@ -247,6 +260,7 @@ export function Project() {
               onPlay={() => setA(t)}
               onCompare={() => compareWith(t)}
               onSaveNote={(note) => saveNote(t, note)}
+              onDelete={() => deleteTake(t)}
             />
           ))}
         </ul>
@@ -283,8 +297,9 @@ function TakeRow(props: {
   onPlay: () => void;
   onCompare: () => void;
   onSaveNote: (note: string) => void;
+  onDelete: () => void;
 }) {
-  const { take, isA, isB, onPlay, onCompare, onSaveNote } = props;
+  const { take, isA, isB, onPlay, onCompare, onSaveNote, onDelete } = props;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(take.note ?? '');
 
@@ -362,6 +377,18 @@ function TakeRow(props: {
           fontFamily: 'var(--mono)', fontWeight: 700,
         }}
       >{isB ? 'B✓' : 'A/B'}</button>
+      <button
+        onClick={onDelete}
+        title="delete take"
+        aria-label="delete"
+        style={{
+          width: 32, height: 32, flex: '0 0 auto',
+          borderRadius: 6, fontSize: 14,
+          background: 'transparent',
+          color: 'var(--text-muted)',
+          border: '1px solid var(--stroke)',
+        }}
+      >✕</button>
     </li>
   );
 }

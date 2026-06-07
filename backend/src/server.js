@@ -113,6 +113,8 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
 
   // Push to remote storage when configured. Local backend is a no-op
   // (multer already wrote the WAV; ffmpeg already wrote the Opus).
+  // If storage fails we 5xx so the plugin's Uploader retries — better
+  // than silently saving a DB row that points at a missing object.
   try {
     const storage = await getStorage();
     if (storage.kind !== 'local') {
@@ -121,6 +123,7 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
     }
   } catch (e) {
     console.error('[earshot] storage put failed:', e.message);
+    return res.status(502).json({ error: 'storage upload failed', detail: e.message });
   }
 
   db.prepare(`
@@ -166,6 +169,29 @@ app.get('/projects/:id/takes', (req, res) => {
     ORDER BY created_at DESC
   `).all(req.params.id);
   res.json(rows);
+});
+
+// DELETE /takes/:id — remove from storage + DB. Idempotent: a 404 is
+// fine if it's already gone.
+app.delete('/takes/:id', async (req, res) => {
+  const row = db.prepare(
+    'SELECT filename, opus_filename FROM takes WHERE id = ?'
+  ).get(req.params.id);
+  if (!row) return res.status(404).end();
+
+  const storage = await getStorage();
+  for (const name of [row.filename, row.opus_filename].filter(Boolean)) {
+    try { await storage.remove(name); }
+    catch (e) { console.error(`[earshot] delete from storage failed for ${name}:`, e.message); }
+    // Also clean up local copies if any.
+    const local = path.join(AUDIO_DIR, name);
+    if (fs.existsSync(local)) {
+      try { fs.unlinkSync(local); } catch {}
+    }
+  }
+
+  db.prepare('DELETE FROM takes WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
 });
 
 // PATCH /takes/:id — update editable fields (currently just note).

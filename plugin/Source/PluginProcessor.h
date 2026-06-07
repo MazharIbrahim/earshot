@@ -5,6 +5,7 @@
 #include "TakeWriter.h"
 #include "Uploader.h"
 #include "HealthPoller.h"
+#include "TakesPoller.h"
 
 class EarshotAudioProcessor : public juce::AudioProcessor
 {
@@ -60,6 +61,7 @@ public:
     TakeWriter&   getTakeWriter()   { return takeWriter; }
     Uploader&     getUploader()     { return uploader; }
     HealthPoller& getHealthPoller() { return healthPoller; }
+    TakesPoller&  getTakesPoller()  { return takesPoller; }
 
     // Future fields, surfaced for the editor.
     bool isLive() const { return liveActive.load(); }
@@ -74,6 +76,7 @@ private:
     TakeWriter    takeWriter;
     Uploader      uploader;
     HealthPoller  healthPoller;
+    TakesPoller   takesPoller;
     std::atomic<bool> capturing    { false };
     std::atomic<bool> armRequested { false };
     bool prevCapturing { false };

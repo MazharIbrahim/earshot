@@ -46,6 +46,10 @@ const localStorage = {
   },
   resolvePath(key) { return path.join(LOCAL_DIR, key); },
   exists(key) { return fs.existsSync(path.join(LOCAL_DIR, key)); },
+  async remove(key) {
+    const p = path.join(LOCAL_DIR, key);
+    if (fs.existsSync(p)) await fs.promises.unlink(p);
+  },
 };
 
 // ---------- Cloudflare R2 (S3-compatible) ----------
@@ -57,8 +61,9 @@ async function buildR2Storage() {
   if (missing.length) {
     throw new Error(`R2 storage requested but missing env: ${missing.join(', ')}`);
   }
-  const { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand } =
+  const { S3Client, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } =
     await import('@aws-sdk/client-s3');
+  const { Upload } = await import('@aws-sdk/lib-storage');
 
   const client = new S3Client({
     region: 'auto',
@@ -74,10 +79,18 @@ async function buildR2Storage() {
   return {
     kind: 'r2',
     async put(key, source, contentType) {
+      // lib-storage's Upload class handles multipart automatically and
+      // sets Content-Length correctly for streams — avoids the EPIPE we
+      // were hitting on bare PutObjectCommand for >5 MB streamed bodies.
       const Body = Buffer.isBuffer(source) ? source : fs.createReadStream(source);
-      await client.send(new PutObjectCommand({
-        Bucket, Key: key, Body, ContentType: contentType,
-      }));
+      const upload = new Upload({
+        client,
+        params: { Bucket, Key: key, Body, ContentType: contentType },
+        queueSize: 4,           // up to 4 parts in parallel
+        partSize:  5 * 1024 * 1024, // 5 MB parts (the S3 minimum)
+        leavePartsOnError: false,
+      });
+      await upload.done();
     },
     url(key) {
       // Public custom-domain URL. R2 free egress means we can serve direct
@@ -94,6 +107,9 @@ async function buildR2Storage() {
         await client.send(new HeadObjectCommand({ Bucket, Key: key }));
         return true;
       } catch { return false; }
+    },
+    async remove(key) {
+      await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
     },
   };
 }
@@ -143,6 +159,10 @@ async function buildSupabaseStorage() {
         const { data } = await client.from(Bucket).list('', { search: key, limit: 1 });
         return Array.isArray(data) && data.some(f => f.name === key);
       } catch { return false; }
+    },
+    async remove(key) {
+      const { error } = await client.from(Bucket).remove([key]);
+      if (error) throw new Error(`supabase delete failed: ${error.message}`);
     },
   };
 }

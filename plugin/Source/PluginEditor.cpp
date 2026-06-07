@@ -1,5 +1,9 @@
 #include "PluginEditor.h"
 
+extern "C" {
+#include "qrcodegen.h"
+}
+
 using namespace EarshotBrand;
 
 static juce::Font monoFont (float height, juce::Font::FontStyleFlags style = juce::Font::plain)
@@ -7,12 +11,11 @@ static juce::Font monoFont (float height, juce::Font::FontStyleFlags style = juc
     return juce::Font (juce::Font::getDefaultMonospacedFontName(), height, style);
 }
 
-static juce::String formatRelative (juce::Time t)
+static juce::String formatRelative (juce::int64 ms)
 {
-    const auto diffMs = juce::Time::getCurrentTime().toMilliseconds() - t.toMilliseconds();
-    const auto diffSec = diffMs / 1000;
-    if (diffSec < 60)   return juce::String (diffSec) + "s ago";
-    if (diffSec < 3600) return juce::String (diffSec / 60) + "m ago";
+    const auto diffSec = (juce::Time::getCurrentTime().toMilliseconds() - ms) / 1000;
+    if (diffSec < 60)    return juce::String (diffSec) + "s ago";
+    if (diffSec < 3600)  return juce::String (diffSec / 60) + "m ago";
     if (diffSec < 86400) return juce::String (diffSec / 3600) + "h ago";
     return juce::String (diffSec / 86400) + "d ago";
 }
@@ -23,19 +26,17 @@ static juce::String formatDuration (double sec)
     return juce::String (s / 60) + ":" + juce::String (s % 60).paddedLeft ('0', 2);
 }
 
-// Matches backend slug(): lowercase, non-alphanumeric -> '-', collapse runs,
-// trim leading/trailing dashes. Identical output to the JS implementation so
-// the project URL the plugin opens lands on the same Project page the PWA
-// would have routed to.
+// Matches backend slug(); kept here too so editor-side display logic stays
+// independent of the processor.
 static juce::String slugify (const juce::String& s)
 {
     juce::String out;
-    bool lastWasDash = true; // suppress leading dash
+    bool lastDash = true;
     for (auto cp : s.toLowerCase())
     {
         bool alnum = (cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9');
-        if (alnum) { out += juce::String::charToString (cp); lastWasDash = false; }
-        else if (! lastWasDash) { out += '-'; lastWasDash = true; }
+        if (alnum) { out += juce::String::charToString (cp); lastDash = false; }
+        else if (! lastDash) { out += '-'; lastDash = true; }
     }
     while (out.endsWithChar ('-')) out = out.dropLastCharacters (1);
     return out.isEmpty() ? juce::String ("untitled") : out;
@@ -57,7 +58,6 @@ void LevelMeter::paint (juce::Graphics& g)
         if (lvl > 0.001f)
         {
             auto fill = r.withWidth (r.getWidth() * lvl);
-            // Amber below ~0.85, red above for clipping awareness.
             juce::Colour c = lvl > 0.85f ? juce::Colour (0xffff5a3c) : accent;
             g.setColour (c);
             g.fillRoundedRectangle (fill, 2.0f);
@@ -70,11 +70,155 @@ void LevelMeter::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+void TakesListComponent::paint (juce::Graphics& g)
+{
+    if (takes.empty())
+    {
+        g.setColour (textMuted);
+        g.setFont (monoFont (12.0f));
+        g.drawText (juce::String::fromUTF8 ("no takes yet — hit record while playing."),
+                    getLocalBounds(), juce::Justification::topLeft, false);
+        return;
+    }
+
+    int y = 0;
+    for (size_t i = 0; i < takes.size() && y + rowHeight <= getHeight(); ++i)
+    {
+        const auto& t = takes[i];
+        auto rowR = juce::Rectangle<int> (0, y, getWidth(), rowHeight);
+
+        // delete button hit area on the right
+        auto delR = rowR.removeFromRight (deleteButtonWidth);
+        g.setColour (textMuted);
+        g.setFont (monoFont (14.0f));
+        g.drawText ("x", delR, juce::Justification::centred, false);
+
+        // label (note or timestamp)
+        juce::String label = t.note.isNotEmpty()
+            ? t.note
+            : juce::Time (t.createdAtMs).formatted ("%b %-d, %-I:%M %p");
+
+        g.setColour (text);
+        g.setFont (monoFont (12.0f));
+        g.drawText (label, rowR.removeFromLeft (rowR.getWidth() - 70),
+                    juce::Justification::centredLeft, true);
+
+        // duration + relative time
+        g.setColour (textMuted);
+        g.setFont (monoFont (10.0f));
+        juce::String meta = formatDuration (t.durationSec)
+                            + juce::String::fromUTF8 (" · ")
+                            + formatRelative (t.createdAtMs);
+        g.drawText (meta, rowR, juce::Justification::centredRight, false);
+
+        y += rowHeight;
+        g.setColour (stroke);
+        g.drawLine (0.0f, (float) y, (float) getWidth(), (float) y, 1.0f);
+    }
+}
+
+void TakesListComponent::mouseDown (const juce::MouseEvent& e)
+{
+    const int row = e.y / rowHeight;
+    if (row < 0 || row >= (int) takes.size()) return;
+    // Delete only if the click was inside the delete column.
+    if (e.x >= getWidth() - deleteButtonWidth)
+    {
+        const auto id = takes[(size_t) row].id;
+        const auto label = takes[(size_t) row].note;
+        const auto prompt = label.isNotEmpty()
+            ? juce::String ("Delete \"") + label + "\"?"
+            : juce::String ("Delete this take?");
+
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::WarningIcon)
+                .withTitle ("Delete take")
+                .withMessage (prompt + "\n\nThis cannot be undone.")
+                .withButton ("Delete")
+                .withButton ("Cancel"),
+            [this, id] (int result)
+            {
+                if (result == 1 && onDelete) onDelete (id);
+            });
+    }
+}
+
+//==============================================================================
+void QrOverlay::setUrl (const juce::String& url)
+{
+    urlText = url;
+
+    // Build QR code with nayuki's encoder. Medium error correction is a
+    // good balance for laptop screen photos taken in mixed lighting.
+    std::vector<uint8_t> qrBuf (qrcodegen_BUFFER_LEN_MAX);
+    std::vector<uint8_t> tmpBuf (qrcodegen_BUFFER_LEN_MAX);
+
+    bool ok = qrcodegen_encodeText (url.toRawUTF8(),
+                                    tmpBuf.data(), qrBuf.data(),
+                                    qrcodegen_Ecc_MEDIUM,
+                                    qrcodegen_VERSION_MIN,
+                                    qrcodegen_VERSION_MAX,
+                                    qrcodegen_Mask_AUTO, true);
+    if (! ok) { qrSize = 0; qr.clear(); repaint(); return; }
+
+    qrSize = qrcodegen_getSize (qrBuf.data());
+    qr.assign ((size_t) qrSize * (size_t) qrSize, 0);
+    for (int y = 0; y < qrSize; ++y)
+        for (int x = 0; x < qrSize; ++x)
+            qr[(size_t)(y * qrSize + x)] = qrcodegen_getModule (qrBuf.data(), x, y) ? 1 : 0;
+    repaint();
+}
+
+void QrOverlay::paint (juce::Graphics& g)
+{
+    // Dim backdrop.
+    g.fillAll (juce::Colour (0xee0a0a0c));
+
+    auto bounds = getLocalBounds().reduced (24);
+
+    // White card behind the QR for max contrast.
+    const int side = juce::jmin (bounds.getWidth(), bounds.getHeight() - 80);
+    auto card = juce::Rectangle<int> (0, 0, side, side)
+                    .withCentre ({ getWidth() / 2, getHeight() / 2 - 28 });
+    g.setColour (juce::Colours::white);
+    g.fillRoundedRectangle (card.toFloat().expanded (12.0f), 14.0f);
+
+    // Draw QR modules.
+    if (qrSize > 0)
+    {
+        const float modulePx = (float) side / (float) qrSize;
+        g.setColour (juce::Colours::black);
+        for (int y = 0; y < qrSize; ++y)
+            for (int x = 0; x < qrSize; ++x)
+                if (qr[(size_t)(y * qrSize + x)])
+                    g.fillRect (card.getX() + (int) (x * modulePx),
+                                card.getY() + (int) (y * modulePx),
+                                (int) std::ceil (modulePx),
+                                (int) std::ceil (modulePx));
+    }
+
+    // URL caption below.
+    auto caption = juce::Rectangle<int> (0, card.getBottom() + 18, getWidth(), 36);
+    g.setColour (text);
+    g.setFont (monoFont (12.0f));
+    auto display = urlText.startsWith ("https://") ? urlText.substring (8)
+                 : urlText.startsWith ("http://")  ? urlText.substring (7)
+                 : urlText;
+    g.drawText (display, caption, juce::Justification::centred, false);
+
+    g.setColour (textMuted);
+    g.setFont (monoFont (10.0f));
+    g.drawText ("tap anywhere to close", caption.translated (0, 18),
+                juce::Justification::centred, false);
+}
+
+//==============================================================================
 EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
     setLookAndFeel (&lnf);
-    setSize (360, 470);
+    setSize (380, 520);
 
     wordmark.setText ("EARSHOT", juce::dontSendNotification);
     wordmark.setFont (monoFont (13.0f, juce::Font::bold));
@@ -86,10 +230,7 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     projectLabel.setFont (monoFont (18.0f, juce::Font::bold));
     projectLabel.setColour (juce::Label::textColourId, text);
     projectLabel.setEditable (false, true, false);
-    projectLabel.onTextChange = [this]
-    {
-        processorRef.setProjectName (projectLabel.getText());
-    };
+    projectLabel.onTextChange = [this] { processorRef.setProjectName (projectLabel.getText()); };
     addAndMakeVisible (projectLabel);
 
     statusLabel.setText ("idle", juce::dontSendNotification);
@@ -102,28 +243,30 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     recButton.onClick = [this]
     {
-        // One toggle covers all three states:
-        //  - idle      → arm (waiting for play)
-        //  - armed     → cancel the arm
-        //  - recording → force-stop early (transport keeps playing,
-        //                we just close the take and disarm)
         processorRef.setArmed (! processorRef.isArmed());
         updateRecButton();
     };
     addAndMakeVisible (recButton);
 
-    openFolderButton.onClick = [] { TakeWriter::takesRoot().revealToUser(); };
-    addAndMakeVisible (openFolderButton);
-
-    openBrowserButton.onClick = [this]
+    openPhoneButton.onClick = [this]
     {
         auto base = processorRef.getHealthPoller().getPublicUrl();
         if (base.isEmpty()) return;
-        auto slug = slugify (processorRef.getProjectName());
-        juce::URL deepLink (base + "/p/" + slug);
-        deepLink.launchInDefaultBrowser();
+        auto deepLink = base + "/p/" + slugify (processorRef.getProjectName());
+        showQrFor (deepLink);
     };
-    addAndMakeVisible (openBrowserButton);
+    addAndMakeVisible (openPhoneButton);
+
+    takesHeader.setText ("recent takes", juce::dontSendNotification);
+    takesHeader.setFont (monoFont (11.0f));
+    takesHeader.setColour (juce::Label::textColourId, textMuted);
+    addAndMakeVisible (takesHeader);
+
+    takesList.onDelete = [this] (const juce::String& id)
+    {
+        processorRef.getTakesPoller().requestDelete (id);
+    };
+    addAndMakeVisible (takesList);
 
     urlPrompt.setText ("mobile preview", juce::dontSendNotification);
     urlPrompt.setFont (monoFont (11.0f));
@@ -138,64 +281,48 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     copyButton.onClick = [this]
     {
         auto url = processorRef.getHealthPoller().getPublicUrl();
-        if (url.isNotEmpty())
-            juce::SystemClipboard::copyTextToClipboard (url);
+        if (url.isNotEmpty()) juce::SystemClipboard::copyTextToClipboard (url);
     };
     addAndMakeVisible (copyButton);
 
-    takesHeader.setText ("recent takes", juce::dontSendNotification);
-    takesHeader.setFont (monoFont (11.0f));
-    takesHeader.setColour (juce::Label::textColourId, textMuted);
-    addAndMakeVisible (takesHeader);
+    addChildComponent (qrOverlay); // hidden until shown
 
-    takesBody.setFont (monoFont (12.0f));
-    takesBody.setColour (juce::Label::textColourId, textMuted);
-    takesBody.setJustificationType (juce::Justification::topLeft);
-    addAndMakeVisible (takesBody);
-
-    processorRef.getTakeWriter().onTakesChanged = [this]
+    processorRef.getTakesPoller().onTakesChanged = [this]
     {
         juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EarshotAudioProcessorEditor> (this)]
-        {
-            if (sp != nullptr) sp->refreshTakes();
-        });
+        { if (sp != nullptr) sp->refreshTakes(); });
     };
 
     processorRef.getUploader().onStateChanged = [this]
     {
         juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EarshotAudioProcessorEditor> (this)]
-        {
-            if (sp != nullptr) sp->refreshUploadStatus();
-        });
+        { if (sp != nullptr) sp->refreshUploadStatus(); });
     };
 
     processorRef.getHealthPoller().onUrlChanged = [this]
     {
         juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EarshotAudioProcessorEditor> (this)]
-        {
-            if (sp != nullptr) sp->refreshPublicUrl();
-        });
+        { if (sp != nullptr) sp->refreshPublicUrl(); });
     };
 
     refreshTakes();
     updateRecButton();
     refreshUploadStatus();
     refreshPublicUrl();
-    startTimerHz (24); // smooth meter
+    startTimerHz (12); // smooth meter; takes list is event-driven
 }
 
 EarshotAudioProcessorEditor::~EarshotAudioProcessorEditor()
 {
-    processorRef.getTakeWriter().onTakesChanged = nullptr;
-    processorRef.getUploader().onStateChanged   = nullptr;
-    processorRef.getHealthPoller().onUrlChanged = nullptr;
+    processorRef.getTakesPoller().onTakesChanged = nullptr;
+    processorRef.getUploader().onStateChanged    = nullptr;
+    processorRef.getHealthPoller().onUrlChanged  = nullptr;
     setLookAndFeel (nullptr);
 }
 
 void EarshotAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
-
     auto sep = getLocalBounds().reduced (16, 0).withHeight (1).withY (242);
     g.setColour (stroke);
     g.fillRect (sep);
@@ -207,7 +334,7 @@ void EarshotAudioProcessorEditor::resized()
 
     auto topBar = r.removeFromTop (24);
     wordmark.setBounds (topBar.removeFromLeft (90));
-    statusLabel.setBounds (topBar.removeFromRight (180));
+    statusLabel.setBounds (topBar.removeFromRight (200));
 
     r.removeFromTop (8);
     projectLabel.setBounds (r.removeFromTop (28));
@@ -219,51 +346,40 @@ void EarshotAudioProcessorEditor::resized()
     recButton.setBounds (r.removeFromTop (52));
 
     r.removeFromTop (10);
-    auto actionRow = r.removeFromTop (28);
-    auto half = actionRow.getWidth() / 2 - 4;
-    openBrowserButton.setBounds (actionRow.removeFromLeft (half));
-    actionRow.removeFromLeft (8);
-    openFolderButton.setBounds (actionRow.removeFromLeft (half));
+    openPhoneButton.setBounds (r.removeFromTop (32));
 
     r.removeFromTop (20);
     takesHeader.setBounds (r.removeFromTop (16));
     r.removeFromTop (6);
-    auto takesArea = r.removeFromTop (140);
-    takesBody.setBounds (takesArea);
+    auto takesArea = r.removeFromTop (180);
+    takesList.setBounds (takesArea);
 
-    // Footer: two-line block — prompt label, then URL row with copy button.
+    // Footer.
     auto footer = r.removeFromBottom (44);
     urlPrompt.setBounds (footer.removeFromTop (14));
     auto urlRow = footer.removeFromTop (24);
     copyButton.setBounds (urlRow.removeFromRight (56));
     urlRow.removeFromRight (8);
     urlValue.setBounds (urlRow);
+
+    qrOverlay.setBounds (getLocalBounds());
 }
 
 void EarshotAudioProcessorEditor::timerCallback()
 {
     meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
-    updateRecButton(); // transport-driven state changes need a refresh too
+    updateRecButton();
 
     if (processorRef.isRecording())
     {
-        const auto frames = processorRef.getFramesCapturedThisTake();
         statusLabel.setText (juce::String::fromUTF8 ("recording · ")
-                             + juce::String (frames) + " frames",
+                             + juce::String (processorRef.getFramesCapturedThisTake()) + " frames",
                              juce::dontSendNotification);
         statusLabel.setColour (juce::Label::textColourId, accent);
     }
     else if (processorRef.isWaitingForPlay())
     {
         statusLabel.setText (juce::String::fromUTF8 ("armed · waiting for play"),
-                             juce::dontSendNotification);
-        statusLabel.setColour (juce::Label::textColourId, accent);
-    }
-    else if (processorRef.isLive())
-    {
-        statusLabel.setText (juce::String::fromUTF8 ("live · ")
-                             + juce::String (processorRef.listenerCount())
-                             + (processorRef.listenerCount() == 1 ? " listener" : " listeners"),
                              juce::dontSendNotification);
         statusLabel.setColour (juce::Label::textColourId, accent);
     }
@@ -295,10 +411,7 @@ void EarshotAudioProcessorEditor::updateRecButton()
 
 void EarshotAudioProcessorEditor::refreshTakes()
 {
-    auto t = processorRef.getTakeWriter().snapshotTakes();
-    takesBody.setText (renderTakesText (t), juce::dontSendNotification);
-    takesBody.setColour (juce::Label::textColourId,
-                         t.empty() ? textMuted : text);
+    takesList.setTakes (processorRef.getTakesPoller().getTakes());
 }
 
 void EarshotAudioProcessorEditor::refreshPublicUrl()
@@ -306,23 +419,20 @@ void EarshotAudioProcessorEditor::refreshPublicUrl()
     auto url = processorRef.getHealthPoller().getPublicUrl();
     if (url.isEmpty())
     {
-        urlValue.setText (juce::String::fromUTF8 ("connecting…"),
-                          juce::dontSendNotification);
+        urlValue.setText (juce::String::fromUTF8 ("connecting…"), juce::dontSendNotification);
         urlValue.setColour (juce::Label::textColourId, textMuted);
         copyButton.setEnabled (false);
-        openBrowserButton.setEnabled (false);
+        openPhoneButton.setEnabled (false);
     }
     else
     {
-        // Strip the scheme for display — the tunnel URL is long, this saves
-        // horizontal space without losing what you'd type into a phone browser.
         auto display = url.startsWith ("https://") ? url.substring (8)
                      : url.startsWith ("http://")  ? url.substring (7)
                      : url;
         urlValue.setText (display, juce::dontSendNotification);
         urlValue.setColour (juce::Label::textColourId, accent);
         copyButton.setEnabled (true);
-        openBrowserButton.setEnabled (true);
+        openPhoneButton.setEnabled (true);
     }
 }
 
@@ -352,27 +462,14 @@ void EarshotAudioProcessorEditor::refreshUploadStatus()
             break;
     }
 
-    takesHeader.setText (juce::String ("recent takes") + suffix,
-                         juce::dontSendNotification);
+    takesHeader.setText (juce::String ("recent takes") + suffix, juce::dontSendNotification);
     takesHeader.setColour (juce::Label::textColourId, col);
 }
 
-juce::String EarshotAudioProcessorEditor::renderTakesText (const std::vector<TakeRecord>& list) const
+void EarshotAudioProcessorEditor::showQrFor (const juce::String& url)
 {
-    if (list.empty())
-        return juce::String::fromUTF8 ("no takes yet — hit record while playing.");
-
-    juce::String out;
-    int shown = 0;
-    for (auto& t : list)
-    {
-        if (shown >= 5) break;
-        out << t.label << "  "
-            << formatDuration (t.durationSec)
-            << juce::String::fromUTF8 ("  ·  ")
-            << formatRelative (t.createdAt)
-            << "\n";
-        ++shown;
-    }
-    return out.trim();
+    qrOverlay.setUrl (url);
+    qrOverlay.setBounds (getLocalBounds());
+    qrOverlay.setVisible (true);
+    qrOverlay.toFront (false);
 }

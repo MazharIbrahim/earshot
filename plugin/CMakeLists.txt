@@ -38,6 +38,14 @@ target_sources(Earshot PRIVATE
     Source/Uploader.h
     Source/HealthPoller.cpp
     Source/HealthPoller.h
+    Source/TakesPoller.cpp
+    Source/TakesPoller.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/qrcodegen/c/qrcodegen.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/qrcodegen/c/qrcodegen.h
+)
+
+target_include_directories(Earshot PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/qrcodegen/c
 )
 
 target_compile_definitions(Earshot PUBLIC

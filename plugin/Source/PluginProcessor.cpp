@@ -13,6 +13,13 @@ EarshotAudioProcessor::EarshotAudioProcessor()
     };
     uploader.start();
     healthPoller.start();
+    takesPoller.setProjectSlug (juce::String()); // set properly below
+    takesPoller.start();
+
+    // Keep the takes poller's project slug in sync with whatever project
+    // the user names this instance. The slug must match the backend's
+    // slug() function exactly so URLs resolve.
+    setProjectName (projectName);
 }
 
 EarshotAudioProcessor::~EarshotAudioProcessor()
@@ -21,6 +28,7 @@ EarshotAudioProcessor::~EarshotAudioProcessor()
     takeWriter.stop();
     uploader.stop();
     healthPoller.stop();
+    takesPoller.stop();
 }
 
 void EarshotAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
@@ -107,10 +115,26 @@ juce::AudioProcessorEditor* EarshotAudioProcessor::createEditor()
     return new EarshotAudioProcessorEditor (*this);
 }
 
+static juce::String makeSlug (const juce::String& s)
+{
+    // Matches backend slug() exactly.
+    juce::String out;
+    bool lastDash = true;
+    for (auto cp : s.toLowerCase())
+    {
+        bool alnum = (cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9');
+        if (alnum) { out += juce::String::charToString (cp); lastDash = false; }
+        else if (! lastDash) { out += '-'; lastDash = true; }
+    }
+    while (out.endsWithChar ('-')) out = out.dropLastCharacters (1);
+    return out.isEmpty() ? juce::String ("untitled") : out;
+}
+
 void EarshotAudioProcessor::setProjectName (const juce::String& name)
 {
     projectName = name;
     takeWriter.setProjectName (name);
+    takesPoller.setProjectSlug (makeSlug (name));
 }
 
 void EarshotAudioProcessor::getStateInformation (juce::MemoryBlock& dest)

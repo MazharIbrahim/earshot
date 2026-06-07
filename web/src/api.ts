@@ -39,6 +39,11 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
   return r.json();
 }
 
+async function del(path: string): Promise<void> {
+  const r = await fetch(BASE + path, { method: 'DELETE' });
+  if (!r.ok && r.status !== 404) throw new Error(`${path} → ${r.status}`);
+}
+
 export const api = {
   base: BASE,
   projects:  () => get<ApiProject[]>('/projects'),
@@ -46,4 +51,5 @@ export const api = {
   audioUrl:  (takeId: string) => `${BASE}/takes/${takeId}/audio`,
   setNote:   (takeId: string, note: string) =>
     patch<{ ok: true }>(`/takes/${takeId}`, { note }),
+  remove:    (takeId: string) => del(`/takes/${takeId}`),
 };
