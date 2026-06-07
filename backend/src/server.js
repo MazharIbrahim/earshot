@@ -19,6 +19,7 @@ import { nanoid } from 'nanoid';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { startTunnel } from './tunnel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -51,6 +52,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve the built PWA at the root. Backend and frontend share one origin
+// so the PWA can use relative URLs and one Cloudflare tunnel covers both.
+const WEB_DIST = path.join(__dirname, '..', '..', 'web', 'dist');
+if (fs.existsSync(WEB_DIST)) {
+  app.use(express.static(WEB_DIST));
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: AUDIO_DIR,
@@ -62,7 +70,14 @@ const upload = multer({
   limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB per take
 });
 
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
+// Public URL state — set once the Cloudflare tunnel comes up.
+let tunnelStatus = { state: 'starting', publicUrl: null };
+
+app.get('/healthz', (_req, res) => res.json({
+  ok: true,
+  tunnel: tunnelStatus.state,
+  publicUrl: tunnelStatus.publicUrl,
+}));
 
 // POST /takes — multipart: file=audio, fields: project, durationSec
 app.post('/takes', upload.single('audio'), (req, res) => {
@@ -126,7 +141,19 @@ app.get('/takes/:id/audio', (req, res) => {
   res.sendFile(filePath);
 });
 
+// SPA fallback: anything that wasn't an API route or a static file gets
+// the PWA's index.html so React Router handles client-side routing.
+app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
+  const indexFile = path.join(WEB_DIST, 'index.html');
+  if (fs.existsSync(indexFile)) return res.sendFile(indexFile);
+  next();
+});
+
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[earshot] backend listening on http://localhost:${PORT}`);
+  tunnelStatus = startTunnel({
+    port: PORT,
+    onUrl: (url) => { tunnelStatus.publicUrl = url; tunnelStatus.state = 'running'; },
+  });
 });

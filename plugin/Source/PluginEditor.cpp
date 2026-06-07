@@ -56,7 +56,7 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     : AudioProcessorEditor (&p), processorRef (p)
 {
     setLookAndFeel (&lnf);
-    setSize (340, 430);
+    setSize (360, 470);
 
     wordmark.setText ("EARSHOT", juce::dontSendNotification);
     wordmark.setFont (monoFont (13.0f, juce::Font::bold));
@@ -97,8 +97,23 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     openFolderButton.onClick = [] { TakeWriter::takesRoot().revealToUser(); };
     addAndMakeVisible (openFolderButton);
 
-    qrButton.onClick = [] { /* TODO: show QR modal with mobile URL */ };
-    addAndMakeVisible (qrButton);
+    urlPrompt.setText ("mobile preview", juce::dontSendNotification);
+    urlPrompt.setFont (monoFont (11.0f));
+    urlPrompt.setColour (juce::Label::textColourId, textMuted);
+    addAndMakeVisible (urlPrompt);
+
+    urlValue.setText ("connecting…", juce::dontSendNotification);
+    urlValue.setFont (monoFont (11.0f));
+    urlValue.setColour (juce::Label::textColourId, accent);
+    addAndMakeVisible (urlValue);
+
+    copyButton.onClick = [this]
+    {
+        auto url = processorRef.getHealthPoller().getPublicUrl();
+        if (url.isNotEmpty())
+            juce::SystemClipboard::copyTextToClipboard (url);
+    };
+    addAndMakeVisible (copyButton);
 
     takesHeader.setText ("recent takes", juce::dontSendNotification);
     takesHeader.setFont (monoFont (11.0f));
@@ -109,12 +124,6 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     takesBody.setColour (juce::Label::textColourId, textMuted);
     takesBody.setJustificationType (juce::Justification::topLeft);
     addAndMakeVisible (takesBody);
-
-    accountChip.setText (juce::String::fromUTF8 ("not signed in · tap to link"),
-                         juce::dontSendNotification);
-    accountChip.setFont (monoFont (11.0f));
-    accountChip.setColour (juce::Label::textColourId, textMuted);
-    addAndMakeVisible (accountChip);
 
     processorRef.getTakeWriter().onTakesChanged = [this]
     {
@@ -132,9 +141,18 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
         });
     };
 
+    processorRef.getHealthPoller().onUrlChanged = [this]
+    {
+        juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EarshotAudioProcessorEditor> (this)]
+        {
+            if (sp != nullptr) sp->refreshPublicUrl();
+        });
+    };
+
     refreshTakes();
     updateRecButton();
     refreshUploadStatus();
+    refreshPublicUrl();
     startTimerHz (24); // smooth meter
 }
 
@@ -142,6 +160,7 @@ EarshotAudioProcessorEditor::~EarshotAudioProcessorEditor()
 {
     processorRef.getTakeWriter().onTakesChanged = nullptr;
     processorRef.getUploader().onStateChanged   = nullptr;
+    processorRef.getHealthPoller().onUrlChanged = nullptr;
     setLookAndFeel (nullptr);
 }
 
@@ -180,9 +199,13 @@ void EarshotAudioProcessorEditor::resized()
     auto takesArea = r.removeFromTop (140);
     takesBody.setBounds (takesArea);
 
-    auto bottom = r.removeFromBottom (24);
-    accountChip.setBounds (bottom.removeFromLeft (240));
-    qrButton.setBounds (bottom.removeFromRight (40));
+    // Footer: two-line block — prompt label, then URL row with copy button.
+    auto footer = r.removeFromBottom (44);
+    urlPrompt.setBounds (footer.removeFromTop (14));
+    auto urlRow = footer.removeFromTop (24);
+    copyButton.setBounds (urlRow.removeFromRight (56));
+    urlRow.removeFromRight (8);
+    urlValue.setBounds (urlRow);
 }
 
 void EarshotAudioProcessorEditor::timerCallback()
@@ -244,6 +267,29 @@ void EarshotAudioProcessorEditor::refreshTakes()
     takesBody.setText (renderTakesText (t), juce::dontSendNotification);
     takesBody.setColour (juce::Label::textColourId,
                          t.empty() ? textMuted : text);
+}
+
+void EarshotAudioProcessorEditor::refreshPublicUrl()
+{
+    auto url = processorRef.getHealthPoller().getPublicUrl();
+    if (url.isEmpty())
+    {
+        urlValue.setText (juce::String::fromUTF8 ("connecting…"),
+                          juce::dontSendNotification);
+        urlValue.setColour (juce::Label::textColourId, textMuted);
+        copyButton.setEnabled (false);
+    }
+    else
+    {
+        // Strip the scheme for display — the tunnel URL is long, this saves
+        // horizontal space without losing what you'd type into a phone browser.
+        auto display = url.startsWith ("https://") ? url.substring (8)
+                     : url.startsWith ("http://")  ? url.substring (7)
+                     : url;
+        urlValue.setText (display, juce::dontSendNotification);
+        urlValue.setColour (juce::Label::textColourId, accent);
+        copyButton.setEnabled (true);
+    }
 }
 
 void EarshotAudioProcessorEditor::refreshUploadStatus()

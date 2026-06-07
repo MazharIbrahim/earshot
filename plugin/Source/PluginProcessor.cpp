@@ -12,6 +12,7 @@ EarshotAudioProcessor::EarshotAudioProcessor()
         uploader.enqueue (rec.file, projectName, rec.durationSec);
     };
     uploader.start();
+    healthPoller.start();
 }
 
 EarshotAudioProcessor::~EarshotAudioProcessor()
@@ -19,6 +20,7 @@ EarshotAudioProcessor::~EarshotAudioProcessor()
     takeWriter.onTakeSaved = nullptr;
     takeWriter.stop();
     uploader.stop();
+    healthPoller.stop();
 }
 
 void EarshotAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)

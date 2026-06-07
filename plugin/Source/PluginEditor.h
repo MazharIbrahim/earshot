@@ -31,6 +31,7 @@ private:
     juce::String renderTakesText (const std::vector<TakeRecord>&) const;
     void updateRecButton();
     void refreshUploadStatus();
+    void refreshPublicUrl();
 
     EarshotAudioProcessor& processorRef;
     BrandLookAndFeel lnf;
@@ -41,10 +42,12 @@ private:
     LevelMeter   meter;
     juce::TextButton recButton  { "record" };
     juce::TextButton openFolderButton { "show in finder" };
-    juce::TextButton qrButton   { "qr" };
     juce::Label  takesHeader;
     juce::Label  takesBody;
-    juce::Label  accountChip;
+    // Footer: public URL for the mobile preview, plus a "copy" button.
+    juce::Label      urlPrompt;
+    juce::Label      urlValue;
+    juce::TextButton copyButton { "copy" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarshotAudioProcessorEditor)
 };

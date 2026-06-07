@@ -2,8 +2,9 @@
 // backend at :8787 directly. In prod, both will live behind the same host
 // and we'll switch to relative URLs.
 
-const BASE = (import.meta as any).env?.VITE_API_BASE
-  ?? `http://${window.location.hostname}:8787`;
+// In production the PWA is served from the same origin as the API, so we
+// use relative URLs. Override with VITE_API_BASE for split-host dev.
+const BASE = (import.meta as any).env?.VITE_API_BASE ?? '';
 
 export type ApiProject = {
   projectId: string;

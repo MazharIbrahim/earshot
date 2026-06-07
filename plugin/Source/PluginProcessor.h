@@ -4,6 +4,7 @@
 #include "CaptureBuffer.h"
 #include "TakeWriter.h"
 #include "Uploader.h"
+#include "HealthPoller.h"
 
 class EarshotAudioProcessor : public juce::AudioProcessor
 {
@@ -56,8 +57,9 @@ public:
     float getPeakL() const { return peakL.load(); }
     float getPeakR() const { return peakR.load(); }
 
-    TakeWriter& getTakeWriter() { return takeWriter; }
-    Uploader&   getUploader()   { return uploader; }
+    TakeWriter&   getTakeWriter()   { return takeWriter; }
+    Uploader&     getUploader()     { return uploader; }
+    HealthPoller& getHealthPoller() { return healthPoller; }
 
     // Future fields, surfaced for the editor.
     bool isLive() const { return liveActive.load(); }
@@ -71,6 +73,7 @@ private:
     CaptureBuffer captureBuffer;
     TakeWriter    takeWriter;
     Uploader      uploader;
+    HealthPoller  healthPoller;
     std::atomic<bool> capturing    { false };
     std::atomic<bool> armRequested { false };
     bool prevCapturing { false };

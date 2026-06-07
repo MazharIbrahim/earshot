@@ -36,6 +36,8 @@ target_sources(Earshot PRIVATE
     Source/TakeWriter.h
     Source/Uploader.cpp
     Source/Uploader.h
+    Source/HealthPoller.cpp
+    Source/HealthPoller.h
 )
 
 target_compile_definitions(Earshot PUBLIC
