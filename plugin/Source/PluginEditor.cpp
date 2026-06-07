@@ -23,6 +23,24 @@ static juce::String formatDuration (double sec)
     return juce::String (s / 60) + ":" + juce::String (s % 60).paddedLeft ('0', 2);
 }
 
+// Matches backend slug(): lowercase, non-alphanumeric -> '-', collapse runs,
+// trim leading/trailing dashes. Identical output to the JS implementation so
+// the project URL the plugin opens lands on the same Project page the PWA
+// would have routed to.
+static juce::String slugify (const juce::String& s)
+{
+    juce::String out;
+    bool lastWasDash = true; // suppress leading dash
+    for (auto cp : s.toLowerCase())
+    {
+        bool alnum = (cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9');
+        if (alnum) { out += juce::String::charToString (cp); lastWasDash = false; }
+        else if (! lastWasDash) { out += '-'; lastWasDash = true; }
+    }
+    while (out.endsWithChar ('-')) out = out.dropLastCharacters (1);
+    return out.isEmpty() ? juce::String ("untitled") : out;
+}
+
 //==============================================================================
 void LevelMeter::paint (juce::Graphics& g)
 {
@@ -96,6 +114,16 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     openFolderButton.onClick = [] { TakeWriter::takesRoot().revealToUser(); };
     addAndMakeVisible (openFolderButton);
+
+    openBrowserButton.onClick = [this]
+    {
+        auto base = processorRef.getHealthPoller().getPublicUrl();
+        if (base.isEmpty()) return;
+        auto slug = slugify (processorRef.getProjectName());
+        juce::URL deepLink (base + "/p/" + slug);
+        deepLink.launchInDefaultBrowser();
+    };
+    addAndMakeVisible (openBrowserButton);
 
     urlPrompt.setText ("mobile preview", juce::dontSendNotification);
     urlPrompt.setFont (monoFont (11.0f));
@@ -191,7 +219,11 @@ void EarshotAudioProcessorEditor::resized()
     recButton.setBounds (r.removeFromTop (52));
 
     r.removeFromTop (10);
-    openFolderButton.setBounds (r.removeFromTop (28));
+    auto actionRow = r.removeFromTop (28);
+    auto half = actionRow.getWidth() / 2 - 4;
+    openBrowserButton.setBounds (actionRow.removeFromLeft (half));
+    actionRow.removeFromLeft (8);
+    openFolderButton.setBounds (actionRow.removeFromLeft (half));
 
     r.removeFromTop (20);
     takesHeader.setBounds (r.removeFromTop (16));
@@ -278,6 +310,7 @@ void EarshotAudioProcessorEditor::refreshPublicUrl()
                           juce::dontSendNotification);
         urlValue.setColour (juce::Label::textColourId, textMuted);
         copyButton.setEnabled (false);
+        openBrowserButton.setEnabled (false);
     }
     else
     {
@@ -289,6 +322,7 @@ void EarshotAudioProcessorEditor::refreshPublicUrl()
         urlValue.setText (display, juce::dontSendNotification);
         urlValue.setColour (juce::Label::textColourId, accent);
         copyButton.setEnabled (true);
+        openBrowserButton.setEnabled (true);
     }
 }
 

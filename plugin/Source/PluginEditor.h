@@ -41,7 +41,8 @@ private:
     juce::Label  statusLabel;
     LevelMeter   meter;
     juce::TextButton recButton  { "record" };
-    juce::TextButton openFolderButton { "show in finder" };
+    juce::TextButton openFolderButton { "finder" };
+    juce::TextButton openBrowserButton { "open on phone" };
     juce::Label  takesHeader;
     juce::Label  takesBody;
     // Footer: public URL for the mobile preview, plus a "copy" button.

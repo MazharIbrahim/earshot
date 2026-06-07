@@ -44,9 +44,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_takes_project ON takes (project_id, created_at DESC);
 `);
 
-// Best-effort migration: add opus_filename column on existing DBs.
-try { db.exec('ALTER TABLE takes ADD COLUMN opus_filename TEXT'); }
-catch (e) { /* already exists, ignore */ }
+// Best-effort migrations on existing DBs.
+try { db.exec('ALTER TABLE takes ADD COLUMN opus_filename TEXT'); } catch {}
+try { db.exec('ALTER TABLE takes ADD COLUMN note TEXT'); } catch {}
 
 const slug = (s) => (s || 'untitled')
   .toLowerCase().trim()
@@ -159,12 +159,24 @@ app.get('/projects/:id/takes', (req, res) => {
     SELECT id, project, project_id AS projectId,
            duration_sec AS durationSec,
            bytes,
+           note,
            created_at AS createdAt
     FROM takes
     WHERE project_id = ?
     ORDER BY created_at DESC
   `).all(req.params.id);
   res.json(rows);
+});
+
+// PATCH /takes/:id — update editable fields (currently just note).
+app.patch('/takes/:id', (req, res) => {
+  const note = typeof req.body.note === 'string'
+    ? req.body.note.slice(0, 200)
+    : null;
+  const result = db.prepare('UPDATE takes SET note = ? WHERE id = ?')
+    .run(note, req.params.id);
+  if (result.changes === 0) return res.status(404).end();
+  res.json({ ok: true });
 });
 
 // GET /takes/:id/audio
