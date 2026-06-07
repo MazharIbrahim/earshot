@@ -11,7 +11,7 @@ static juce::String formatRelative (juce::Time t)
 {
     const auto diffMs = juce::Time::getCurrentTime().toMilliseconds() - t.toMilliseconds();
     const auto diffSec = diffMs / 1000;
-    if (diffSec < 60)  return juce::String (diffSec) + "s ago";
+    if (diffSec < 60)   return juce::String (diffSec) + "s ago";
     if (diffSec < 3600) return juce::String (diffSec / 60) + "m ago";
     if (diffSec < 86400) return juce::String (diffSec / 3600) + "h ago";
     return juce::String (diffSec / 86400) + "d ago";
@@ -23,11 +23,40 @@ static juce::String formatDuration (double sec)
     return juce::String (s / 60) + ":" + juce::String (s % 60).paddedLeft ('0', 2);
 }
 
+//==============================================================================
+void LevelMeter::paint (juce::Graphics& g)
+{
+    auto bounds = getLocalBounds().toFloat();
+    const float gap = 4.0f;
+    const float w = (bounds.getWidth() - gap) * 0.5f;
+
+    auto drawBar = [&] (juce::Rectangle<float> r, float level)
+    {
+        g.setColour (surface);
+        g.fillRoundedRectangle (r, 2.0f);
+
+        const float lvl = juce::jlimit (0.0f, 1.0f, level);
+        if (lvl > 0.001f)
+        {
+            auto fill = r.withWidth (r.getWidth() * lvl);
+            // Amber below ~0.85, red above for clipping awareness.
+            juce::Colour c = lvl > 0.85f ? juce::Colour (0xffff5a3c) : accent;
+            g.setColour (c);
+            g.fillRoundedRectangle (fill, 2.0f);
+        }
+    };
+
+    drawBar (bounds.removeFromLeft (w), levelL);
+    bounds.removeFromLeft (gap);
+    drawBar (bounds, levelR);
+}
+
+//==============================================================================
 EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
     setLookAndFeel (&lnf);
-    setSize (320, 380);
+    setSize (340, 430);
 
     wordmark.setText ("EARSHOT", juce::dontSendNotification);
     wordmark.setFont (monoFont (13.0f, juce::Font::bold));
@@ -45,19 +74,24 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     };
     addAndMakeVisible (projectLabel);
 
-    liveLabel.setText ("offline", juce::dontSendNotification);
-    liveLabel.setFont (monoFont (12.0f));
-    liveLabel.setColour (juce::Label::textColourId, textMuted);
-    liveLabel.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (liveLabel);
+    statusLabel.setText ("idle", juce::dontSendNotification);
+    statusLabel.setFont (monoFont (11.0f));
+    statusLabel.setColour (juce::Label::textColourId, textMuted);
+    statusLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (statusLabel);
 
-    snapshotButton.onClick = [this]
+    addAndMakeVisible (meter);
+
+    recButton.onClick = [this]
     {
-        // Open takes folder for now. Real "force snapshot" will arm the writer
-        // independent of the host transport.
-        TakeWriter::takesRoot().revealToUser();
+        const bool nowRecording = ! processorRef.isRecording();
+        processorRef.setRecording (nowRecording);
+        updateRecButton();
     };
-    addAndMakeVisible (snapshotButton);
+    addAndMakeVisible (recButton);
+
+    openFolderButton.onClick = [] { TakeWriter::takesRoot().revealToUser(); };
+    addAndMakeVisible (openFolderButton);
 
     qrButton.onClick = [] { /* TODO: show QR modal with mobile URL */ };
     addAndMakeVisible (qrButton);
@@ -87,7 +121,8 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     };
 
     refreshTakes();
-    startTimerHz (4);
+    updateRecButton();
+    startTimerHz (24); // smooth meter
 }
 
 EarshotAudioProcessorEditor::~EarshotAudioProcessorEditor()
@@ -100,7 +135,7 @@ void EarshotAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
 
-    auto sep = getLocalBounds().reduced (16, 0).withHeight (1).withY (180);
+    auto sep = getLocalBounds().reduced (16, 0).withHeight (1).withY (242);
     g.setColour (stroke);
     g.fillRect (sep);
 }
@@ -111,45 +146,67 @@ void EarshotAudioProcessorEditor::resized()
 
     auto topBar = r.removeFromTop (24);
     wordmark.setBounds (topBar.removeFromLeft (90));
-    liveLabel.setBounds (topBar.removeFromRight (160));
+    statusLabel.setBounds (topBar.removeFromRight (180));
 
     r.removeFromTop (8);
     projectLabel.setBounds (r.removeFromTop (28));
 
-    r.removeFromTop (16);
-    snapshotButton.setBounds (r.removeFromTop (48));
+    r.removeFromTop (12);
+    meter.setBounds (r.removeFromTop (10));
 
-    r.removeFromTop (24);
+    r.removeFromTop (16);
+    recButton.setBounds (r.removeFromTop (52));
+
+    r.removeFromTop (10);
+    openFolderButton.setBounds (r.removeFromTop (28));
+
+    r.removeFromTop (20);
     takesHeader.setBounds (r.removeFromTop (16));
     r.removeFromTop (6);
     auto takesArea = r.removeFromTop (140);
     takesBody.setBounds (takesArea);
 
     auto bottom = r.removeFromBottom (24);
-    accountChip.setBounds (bottom.removeFromLeft (220));
+    accountChip.setBounds (bottom.removeFromLeft (240));
     qrButton.setBounds (bottom.removeFromRight (40));
 }
 
 void EarshotAudioProcessorEditor::timerCallback()
 {
-    if (processorRef.isCapturing())
+    meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
+
+    if (processorRef.isRecording())
     {
-        liveLabel.setText (juce::String::fromUTF8 ("recording · take in progress"),
-                           juce::dontSendNotification);
-        liveLabel.setColour (juce::Label::textColourId, accent);
+        statusLabel.setText (juce::String::fromUTF8 ("recording · take in progress"),
+                             juce::dontSendNotification);
+        statusLabel.setColour (juce::Label::textColourId, accent);
     }
     else if (processorRef.isLive())
     {
-        liveLabel.setText (juce::String::fromUTF8 ("live · ")
-                           + juce::String (processorRef.listenerCount())
-                           + (processorRef.listenerCount() == 1 ? " listener" : " listeners"),
-                           juce::dontSendNotification);
-        liveLabel.setColour (juce::Label::textColourId, accent);
+        statusLabel.setText (juce::String::fromUTF8 ("live · ")
+                             + juce::String (processorRef.listenerCount())
+                             + (processorRef.listenerCount() == 1 ? " listener" : " listeners"),
+                             juce::dontSendNotification);
+        statusLabel.setColour (juce::Label::textColourId, accent);
     }
     else
     {
-        liveLabel.setText ("offline", juce::dontSendNotification);
-        liveLabel.setColour (juce::Label::textColourId, textMuted);
+        statusLabel.setText ("idle", juce::dontSendNotification);
+        statusLabel.setColour (juce::Label::textColourId, textMuted);
+    }
+}
+
+void EarshotAudioProcessorEditor::updateRecButton()
+{
+    if (processorRef.isRecording())
+    {
+        recButton.setButtonText (juce::String::fromUTF8 ("■  stop"));
+        recButton.setToggleState (true, juce::dontSendNotification);
+    }
+    else
+    {
+        recButton.setButtonText (juce::String::fromUTF8 ("●  record"));
+        recButton.setToggleState (false, juce::dontSendNotification);
     }
 }
 
@@ -164,7 +221,7 @@ void EarshotAudioProcessorEditor::refreshTakes()
 juce::String EarshotAudioProcessorEditor::renderTakesText (const std::vector<TakeRecord>& list) const
 {
     if (list.empty())
-        return juce::String::fromUTF8 ("no takes yet — hit play in your DAW.");
+        return juce::String::fromUTF8 ("no takes yet — hit record while playing.");
 
     juce::String out;
     int shown = 0;

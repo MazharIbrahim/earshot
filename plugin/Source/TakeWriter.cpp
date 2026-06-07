@@ -58,7 +58,7 @@ void TakeWriter::openNewFile()
     dir.createDirectory();
 
     auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d_%H-%M-%S");
-    currentFile = dir.getChildFile (stamp + ".wav");
+    currentFile = dir.getChildFile (safe + "_" + stamp + ".wav");
 
     if (auto stream = std::unique_ptr<juce::FileOutputStream> (currentFile.createOutputStream()))
     {
@@ -94,7 +94,7 @@ void TakeWriter::closeFile()
     }
 
     TakeRecord rec;
-    rec.label       = "v" + juce::String (juce::Time::getCurrentTime().toMilliseconds() % 1000);
+    rec.label       = juce::Time::getCurrentTime().formatted ("%b %-d, %-I:%M %p");
     rec.file        = currentFile;
     rec.durationSec = dur;
     rec.createdAt   = juce::Time::getCurrentTime();

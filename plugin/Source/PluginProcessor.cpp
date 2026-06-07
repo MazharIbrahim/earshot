@@ -35,37 +35,42 @@ void EarshotAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // Detect host transport state. Some hosts don't supply a playhead;
-    // when missing, treat as "always playing" so we still capture audio
-    // (useful for testing with a tone generator above us).
-    bool hostPlaying = true;
-    if (auto* ph = getPlayHead())
-    {
-        if (auto pos = ph->getPosition())
-            hostPlaying = pos->getIsPlaying();
-    }
+    const int n = buffer.getNumSamples();
+    const int numIn = buffer.getNumChannels();
 
-    // Edge transitions arm/disarm the writer.
-    if (hostPlaying && ! prevPlaying)
+    // Always observe the input — drives the level meter so the user can see
+    // audio is actually reaching the plugin even when not recording.
+    if (n > 0 && numIn > 0)
     {
-        capturing.store (true,  std::memory_order_release);
-        takeWriter.arm();
-    }
-    else if (! hostPlaying && prevPlaying)
-    {
-        capturing.store (false, std::memory_order_release);
-        takeWriter.disarm();
-    }
-    prevPlaying = hostPlaying;
-
-    // Push into ring buffer while capturing. We push a stereo pair; if the
-    // bus is mono we duplicate it across both channels.
-    if (hostPlaying)
-    {
-        const int n = buffer.getNumSamples();
         const float* l = buffer.getReadPointer (0);
-        const float* r = buffer.getNumChannels() > 1 ? buffer.getReadPointer (1) : l;
-        captureBuffer.push (l, r, n);
+        const float* r = numIn > 1 ? buffer.getReadPointer (1) : l;
+
+        float pl = peakL.load() * peakDecay;
+        float pr = peakR.load() * peakDecay;
+        for (int i = 0; i < n; ++i)
+        {
+            pl = juce::jmax (pl, std::abs (l[i]));
+            pr = juce::jmax (pr, std::abs (r[i]));
+        }
+        peakL.store (pl);
+        peakR.store (pr);
+
+        // Manual REC: writer is armed only when the user toggles record.
+        const bool wantRecord = recordRequested.load (std::memory_order_acquire);
+        if (wantRecord && ! prevRecording)
+        {
+            capturing.store (true, std::memory_order_release);
+            takeWriter.arm();
+        }
+        else if (! wantRecord && prevRecording)
+        {
+            capturing.store (false, std::memory_order_release);
+            takeWriter.disarm();
+        }
+        prevRecording = wantRecord;
+
+        if (wantRecord)
+            captureBuffer.push (l, r, n);
     }
 
     // Pure pass-through; we only observe audio, never modify it.

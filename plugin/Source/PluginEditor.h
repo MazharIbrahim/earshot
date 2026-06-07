@@ -5,6 +5,16 @@
 #include "BrandLookAndFeel.h"
 #include "TakeWriter.h"
 
+class LevelMeter : public juce::Component
+{
+public:
+    void setLevels (float l, float r) { levelL = l; levelR = r; repaint(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    float levelL { 0.0f }, levelR { 0.0f };
+};
+
 class EarshotAudioProcessorEditor : public juce::AudioProcessorEditor,
                                     private juce::Timer
 {
@@ -19,20 +29,21 @@ private:
     void timerCallback() override;
     void refreshTakes();
     juce::String renderTakesText (const std::vector<TakeRecord>&) const;
+    void updateRecButton();
 
     EarshotAudioProcessor& processorRef;
     BrandLookAndFeel lnf;
 
     juce::Label  wordmark;
     juce::Label  projectLabel;
-    juce::Label  liveLabel;
-    juce::TextButton snapshotButton { "snapshot" };
-    juce::TextButton qrButton       { "qr" };
+    juce::Label  statusLabel;
+    LevelMeter   meter;
+    juce::TextButton recButton  { "record" };
+    juce::TextButton openFolderButton { "show in finder" };
+    juce::TextButton qrButton   { "qr" };
     juce::Label  takesHeader;
     juce::Label  takesBody;
     juce::Label  accountChip;
-
-    int lastTakeCount { -1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarshotAudioProcessorEditor)
 };

@@ -41,6 +41,15 @@ public:
 
     bool isCapturing() const { return capturing.load(); }
 
+    // Manual REC toggle from the UI. The audio thread observes this via
+    // an atomic flag on the next processBlock and arms/disarms the writer.
+    void setRecording (bool shouldRecord) { recordRequested.store (shouldRecord); }
+    bool isRecording() const { return capturing.load(); }
+
+    // Peak meter — read by the editor on a timer. Decays automatically.
+    float getPeakL() const { return peakL.load(); }
+    float getPeakR() const { return peakR.load(); }
+
     TakeWriter& getTakeWriter() { return takeWriter; }
 
     // Future fields, surfaced for the editor.
@@ -54,8 +63,14 @@ private:
 
     CaptureBuffer captureBuffer;
     TakeWriter    takeWriter;
-    std::atomic<bool> capturing { false };
-    bool prevPlaying { false };
+    std::atomic<bool> capturing       { false };
+    std::atomic<bool> recordRequested { false };
+    bool prevRecording { false };
+
+    // Atomic peak levels updated each processBlock.
+    std::atomic<float> peakL { 0.0f };
+    std::atomic<float> peakR { 0.0f };
+    float peakDecay { 0.85f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarshotAudioProcessor)
 };
