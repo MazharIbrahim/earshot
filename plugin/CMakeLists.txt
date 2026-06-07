@@ -31,6 +31,9 @@ target_sources(Earshot PRIVATE
     Source/PluginEditor.h
     Source/BrandLookAndFeel.cpp
     Source/BrandLookAndFeel.h
+    Source/CaptureBuffer.h
+    Source/TakeWriter.cpp
+    Source/TakeWriter.h
 )
 
 target_compile_definitions(Earshot PUBLIC
@@ -42,6 +45,7 @@ target_compile_definitions(Earshot PUBLIC
 target_link_libraries(Earshot PRIVATE
     juce::juce_audio_utils
     juce::juce_audio_processors
+    juce::juce_audio_formats
     juce::juce_gui_basics
     juce::juce_gui_extra
     PUBLIC
