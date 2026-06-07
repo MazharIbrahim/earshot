@@ -84,7 +84,10 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     recButton.onClick = [this]
     {
-        const bool nowRecording = ! processorRef.isRecording();
+        // Toggle based on user's last expressed intent, not the actual
+        // capturing flag — the audio thread updates that asynchronously,
+        // which previously caused the button label to lag by one click.
+        const bool nowRecording = ! processorRef.wantsToRecord();
         processorRef.setRecording (nowRecording);
         updateRecButton();
     };
@@ -174,10 +177,13 @@ void EarshotAudioProcessorEditor::resized()
 void EarshotAudioProcessorEditor::timerCallback()
 {
     meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
+    updateRecButton(); // also covers any state changes from non-UI sources
 
     if (processorRef.isRecording())
     {
-        statusLabel.setText (juce::String::fromUTF8 ("recording · take in progress"),
+        const auto frames = processorRef.getFramesCapturedThisTake();
+        statusLabel.setText (juce::String::fromUTF8 ("recording · ")
+                             + juce::String (frames) + " frames",
                              juce::dontSendNotification);
         statusLabel.setColour (juce::Label::textColourId, accent);
     }
@@ -198,7 +204,9 @@ void EarshotAudioProcessorEditor::timerCallback()
 
 void EarshotAudioProcessorEditor::updateRecButton()
 {
-    if (processorRef.isRecording())
+    // Reflect the user's intent, not the (lagging) audio-thread state.
+    const bool wantsRec = processorRef.wantsToRecord();
+    if (wantsRec)
     {
         recButton.setButtonText (juce::String::fromUTF8 ("■  stop"));
         recButton.setToggleState (true, juce::dontSendNotification);

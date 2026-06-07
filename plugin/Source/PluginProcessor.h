@@ -45,6 +45,12 @@ public:
     // an atomic flag on the next processBlock and arms/disarms the writer.
     void setRecording (bool shouldRecord) { recordRequested.store (shouldRecord); }
     bool isRecording() const { return capturing.load(); }
+    // The user's intent (what they last clicked) — flips immediately on click
+    // so the button label can stay in sync without waiting for the audio thread.
+    bool wantsToRecord() const { return recordRequested.load(); }
+
+    // Diagnostic: total frames passed through the ring buffer for this take.
+    juce::int64 getFramesCapturedThisTake() const { return framesCapturedThisTake.load(); }
 
     // Peak meter — read by the editor on a timer. Decays automatically.
     float getPeakL() const { return peakL.load(); }
@@ -71,6 +77,8 @@ private:
     std::atomic<float> peakL { 0.0f };
     std::atomic<float> peakR { 0.0f };
     float peakDecay { 0.85f };
+
+    std::atomic<juce::int64> framesCapturedThisTake { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarshotAudioProcessor)
 };

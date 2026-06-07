@@ -66,7 +66,7 @@ void TakeWriter::openNewFile()
         writer.reset (fmt.createWriterFor (stream.get(),
                                            sampleRate,
                                            2,            // stereo
-                                           24,           // bit depth
+                                           16,           // bit depth (16-bit PCM)
                                            {},           // metadata
                                            0));          // quality (ignored for WAV)
         if (writer != nullptr)
@@ -74,7 +74,20 @@ void TakeWriter::openNewFile()
             stream.release(); // writer owns it now
             fileOpen = true;
             framesWritten = 0;
+            juce::Logger::writeToLog ("[Earshot] take started: "
+                                       + currentFile.getFullPathName()
+                                       + " sr=" + juce::String (sampleRate, 1));
         }
+        else
+        {
+            juce::Logger::writeToLog ("[Earshot] FAILED to create WAV writer for "
+                                       + currentFile.getFullPathName());
+        }
+    }
+    else
+    {
+        juce::Logger::writeToLog ("[Earshot] FAILED to open output stream for "
+                                   + currentFile.getFullPathName());
     }
 }
 
@@ -85,6 +98,12 @@ void TakeWriter::closeFile()
     const double dur = framesWritten / sampleRate;
     writer.reset(); // flushes and closes
     fileOpen = false;
+
+    juce::Logger::writeToLog ("[Earshot] take closed: "
+                               + currentFile.getFullPathName()
+                               + " frames=" + juce::String (framesWritten)
+                               + " duration=" + juce::String (dur, 2) + "s"
+                               + " size=" + juce::String (currentFile.getSize()) + "B");
 
     // Discard takes shorter than 1 second (transport bumps, etc.).
     if (dur < 1.0)

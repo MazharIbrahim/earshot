@@ -18,6 +18,7 @@ void EarshotAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBl
 {
     captureBuffer.reset();
     takeWriter.setProjectName (projectName);
+    takeWriter.setSampleRate (sampleRate);
     if (! takeWriter.isThreadRunning())
         takeWriter.start (sampleRate);
 }
@@ -59,6 +60,7 @@ void EarshotAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const bool wantRecord = recordRequested.load (std::memory_order_acquire);
         if (wantRecord && ! prevRecording)
         {
+            framesCapturedThisTake.store (0);
             capturing.store (true, std::memory_order_release);
             takeWriter.arm();
         }
@@ -70,7 +72,10 @@ void EarshotAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         prevRecording = wantRecord;
 
         if (wantRecord)
-            captureBuffer.push (l, r, n);
+        {
+            const int pushed = captureBuffer.push (l, r, n);
+            framesCapturedThisTake.fetch_add (pushed);
+        }
     }
 
     // Pure pass-through; we only observe audio, never modify it.

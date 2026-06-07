@@ -24,6 +24,8 @@ public:
 
     void start (double sampleRate);
     void stop();
+    // Update the sample rate (e.g. if the host changes it mid-session).
+    void setSampleRate (double sr) { sampleRate = sr; }
 
     // Called from audio thread on transport change.
     void arm()    noexcept { armed.store (true,  std::memory_order_release); }
