@@ -98,11 +98,62 @@ async function buildR2Storage() {
   };
 }
 
+// ---------- Supabase Storage ----------
+async function buildSupabaseStorage() {
+  const required = ['SUPABASE_URL','SUPABASE_SERVICE_KEY','SUPABASE_BUCKET'];
+  const missing = required.filter(k => !process.env[k]);
+  if (missing.length) {
+    throw new Error(`supabase storage requested but missing env: ${missing.join(', ')}`);
+  }
+  const { StorageClient } = await import('@supabase/storage-js');
+  // storage-js is a focused subpackage of supabase-js; avoids pulling in
+  // the realtime client which requires `ws` on Node < 22.
+  const client = new StorageClient(
+    `${process.env.SUPABASE_URL}/storage/v1`,
+    {
+      apikey: process.env.SUPABASE_SERVICE_KEY,
+      Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+    }
+  );
+  const Bucket = process.env.SUPABASE_BUCKET;
+  const publicBase = `${process.env.SUPABASE_URL}/storage/v1/object/public/${Bucket}`;
+
+  return {
+    kind: 'supabase',
+    async put(key, source, contentType) {
+      const Body = Buffer.isBuffer(source) ? source : await fs.promises.readFile(source);
+      const { error } = await client.from(Bucket).upload(key, Body, {
+        contentType,
+        upsert: true,
+        cacheControl: '31536000', // immutable; key is unique per upload
+      });
+      if (error) throw new Error(`supabase upload failed: ${error.message}`);
+    },
+    url(key) {
+      // Public bucket — direct CDN URL, no proxy through us.
+      return `${publicBase}/${key}`;
+    },
+    async stream(key) {
+      const { data, error } = await client.from(Bucket).download(key);
+      if (error) throw new Error(`supabase download failed: ${error.message}`);
+      return data;
+    },
+    async exists(key) {
+      try {
+        const { data } = await client.from(Bucket).list('', { search: key, limit: 1 });
+        return Array.isArray(data) && data.some(f => f.name === key);
+      } catch { return false; }
+    },
+  };
+}
+
 let cached;
 export async function getStorage() {
   if (cached) return cached;
   const kind = (process.env.EARSHOT_STORAGE || 'local').toLowerCase();
-  cached = kind === 'r2' ? await buildR2Storage() : localStorage;
+  if (kind === 'r2')       cached = await buildR2Storage();
+  else if (kind === 'supabase') cached = await buildSupabaseStorage();
+  else                     cached = localStorage;
   console.log(`[earshot] storage backend: ${cached.kind}`);
   return cached;
 }

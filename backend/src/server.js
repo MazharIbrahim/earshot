@@ -228,6 +228,36 @@ app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
   next();
 });
 
+// Push every local audio file referenced by the DB to remote storage if
+// it isn't already there. Idempotent — runs at startup so cloud is in
+// sync after a migration or when the storage backend changes.
+async function backfillCloud() {
+  const storage = await getStorage();
+  if (storage.kind === 'local') return;
+  const rows = db.prepare(
+    'SELECT id, filename, opus_filename FROM takes'
+  ).all();
+  let uploaded = 0;
+  for (const row of rows) {
+    for (const name of [row.filename, row.opus_filename].filter(Boolean)) {
+      try {
+        const exists = await storage.exists(name);
+        if (exists) continue;
+        const local = path.join(AUDIO_DIR, name);
+        if (!fs.existsSync(local)) continue;
+        const ct = name.endsWith('.opus') ? 'audio/ogg' : 'audio/wav';
+        await storage.put(name, local, ct);
+        uploaded++;
+      } catch (e) {
+        console.error(`[earshot] cloud backfill failed for ${name}:`, e.message);
+      }
+    }
+  }
+  if (uploaded > 0) {
+    console.log(`[earshot] cloud backfill: pushed ${uploaded} file(s) to ${storage.kind}`);
+  }
+}
+
 // Background backfill: takes uploaded before transcoding was added get a
 // .opus next to their .wav. Runs sequentially with low priority so we
 // don't fight live uploads.
@@ -263,5 +293,7 @@ app.listen(PORT, '0.0.0.0', async () => {
     onUrl: (url) => { tunnelStatus.publicUrl = url; tunnelStatus.state = 'running'; },
   });
   // Fire-and-forget; logs progress.
-  backfillOpus().catch(e => console.error('[earshot] backfill error:', e));
+  backfillOpus()
+    .then(() => backfillCloud())
+    .catch(e => console.error('[earshot] backfill error:', e));
 });
