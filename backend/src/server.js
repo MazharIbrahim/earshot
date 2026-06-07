@@ -20,6 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startTunnel } from './tunnel.js';
+import { transcodeToOpus } from './transcode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -41,6 +42,10 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_takes_project ON takes (project_id, created_at DESC);
 `);
+
+// Best-effort migration: add opus_filename column on existing DBs.
+try { db.exec('ALTER TABLE takes ADD COLUMN opus_filename TEXT'); }
+catch (e) { /* already exists, ignore */ }
 
 const slug = (s) => (s || 'untitled')
   .toLowerCase().trim()
@@ -80,18 +85,37 @@ app.get('/healthz', (_req, res) => res.json({
 }));
 
 // POST /takes — multipart: file=audio, fields: project, durationSec
-app.post('/takes', upload.single('audio'), (req, res) => {
+app.post('/takes', upload.single('audio'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'audio file required' });
 
   const project = (req.body.project || 'Untitled').toString().slice(0, 200);
   const projectId = slug(project);
   const duration = Number(req.body.durationSec) || 0;
   const id = nanoid();
+  const wavPath = path.join(AUDIO_DIR, req.file.filename);
+  const opusName = req.file.filename.replace(/\.[^.]+$/, '') + '.opus';
+  const opusPath = path.join(AUDIO_DIR, opusName);
+
+  // Transcode synchronously: small files transcode in under a second
+  // and we want the client to know the take is fully ready.
+  let opusFilename = null;
+  try {
+    await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
+    opusFilename = opusName;
+    console.log(`[earshot] transcoded ${req.file.filename} -> ${opusName}`
+      + ` (${(fs.statSync(opusPath).size / 1024).toFixed(1)} KB`
+      + ` vs ${(req.file.size / 1024).toFixed(1)} KB WAV)`);
+  } catch (e) {
+    console.error('[earshot] transcode failed:', e.message);
+    // Continue without Opus — clients fall back to WAV.
+  }
 
   db.prepare(`
-    INSERT INTO takes (id, project, project_id, filename, duration_sec, bytes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, project, projectId, req.file.filename, duration, req.file.size, Date.now());
+    INSERT INTO takes (id, project, project_id, filename, opus_filename,
+                       duration_sec, bytes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, project, projectId, req.file.filename, opusFilename,
+         duration, req.file.size, Date.now());
 
   res.json({
     id,
@@ -99,6 +123,7 @@ app.post('/takes', upload.single('audio'), (req, res) => {
     projectId,
     durationSec: duration,
     bytes: req.file.size,
+    opus: opusFilename != null,
     createdAt: Date.now(),
   });
 });
@@ -129,14 +154,34 @@ app.get('/projects/:id/takes', (req, res) => {
   res.json(rows);
 });
 
+// GET /takes/:id/audio
+// Default: Opus (12x smaller, near-instant start on mobile).
+// ?format=wav: original lossless WAV (for archival download, Pro feature).
 app.get('/takes/:id/audio', (req, res) => {
-  const row = db.prepare('SELECT filename FROM takes WHERE id = ?').get(req.params.id);
+  const row = db.prepare(
+    'SELECT filename, opus_filename FROM takes WHERE id = ?'
+  ).get(req.params.id);
   if (!row) return res.status(404).end();
-  const filePath = path.join(AUDIO_DIR, row.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).end();
 
-  // express handles Range requests when using sendFile.
-  res.setHeader('Content-Type', 'audio/wav');
+  const wantWav = req.query.format === 'wav';
+  const serveOpus = !wantWav && row.opus_filename;
+
+  const filename = serveOpus ? row.opus_filename : row.filename;
+  const filePath = path.join(AUDIO_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    // Opus missing but WAV exists — fall back gracefully.
+    if (serveOpus) {
+      const wavFallback = path.join(AUDIO_DIR, row.filename);
+      if (fs.existsSync(wavFallback)) {
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Accept-Ranges', 'bytes');
+        return res.sendFile(wavFallback);
+      }
+    }
+    return res.status(404).end();
+  }
+
+  res.setHeader('Content-Type', serveOpus ? 'audio/ogg' : 'audio/wav');
   res.setHeader('Accept-Ranges', 'bytes');
   res.sendFile(filePath);
 });
@@ -149,6 +194,32 @@ app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
   next();
 });
 
+// Background backfill: takes uploaded before transcoding was added get a
+// .opus next to their .wav. Runs sequentially with low priority so we
+// don't fight live uploads.
+async function backfillOpus() {
+  const rows = db.prepare(
+    'SELECT id, filename FROM takes WHERE opus_filename IS NULL'
+  ).all();
+  if (rows.length === 0) return;
+  console.log(`[earshot] backfill: ${rows.length} take(s) need transcoding`);
+
+  for (const row of rows) {
+    const wavPath = path.join(AUDIO_DIR, row.filename);
+    if (!fs.existsSync(wavPath)) continue;
+    const opusName = row.filename.replace(/\.[^.]+$/, '') + '.opus';
+    const opusPath = path.join(AUDIO_DIR, opusName);
+    try {
+      await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
+      db.prepare('UPDATE takes SET opus_filename = ? WHERE id = ?')
+        .run(opusName, row.id);
+      console.log(`[earshot] backfilled ${row.filename}`);
+    } catch (e) {
+      console.error(`[earshot] backfill failed for ${row.filename}:`, e.message);
+    }
+  }
+}
+
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[earshot] backend listening on http://localhost:${PORT}`);
@@ -156,4 +227,6 @@ app.listen(PORT, '0.0.0.0', () => {
     port: PORT,
     onUrl: (url) => { tunnelStatus.publicUrl = url; tunnelStatus.state = 'running'; },
   });
+  // Fire-and-forget; logs progress.
+  backfillOpus().catch(e => console.error('[earshot] backfill error:', e));
 });
