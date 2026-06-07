@@ -124,6 +124,7 @@ void TakeWriter::closeFile()
         if (takes.size() > 16) takes.resize (16);
     }
 
+    if (onTakeSaved)    onTakeSaved (rec);
     if (onTakesChanged) onTakesChanged();
 }
 

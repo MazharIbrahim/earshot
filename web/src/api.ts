@@ -1,0 +1,35 @@
+// Tiny API client. In dev, Vite serves the PWA at :5173 and we hit the
+// backend at :8787 directly. In prod, both will live behind the same host
+// and we'll switch to relative URLs.
+
+const BASE = (import.meta as any).env?.VITE_API_BASE
+  ?? `http://${window.location.hostname}:8787`;
+
+export type ApiProject = {
+  projectId: string;
+  project: string;
+  takes: number;
+  latestCreatedAt: number;
+};
+
+export type ApiTake = {
+  id: string;
+  project: string;
+  projectId: string;
+  durationSec: number;
+  bytes: number;
+  createdAt: number;
+};
+
+async function get<T>(path: string): Promise<T> {
+  const r = await fetch(BASE + path);
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
+export const api = {
+  base: BASE,
+  projects: () => get<ApiProject[]>('/projects'),
+  takes:    (projectId: string) => get<ApiTake[]>(`/projects/${projectId}/takes`),
+  audioUrl: (takeId: string) => `${BASE}/takes/${takeId}/audio`,
+};

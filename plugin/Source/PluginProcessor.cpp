@@ -7,11 +7,18 @@ EarshotAudioProcessor::EarshotAudioProcessor()
         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       takeWriter (captureBuffer)
 {
+    takeWriter.onTakeSaved = [this] (const TakeRecord& rec)
+    {
+        uploader.enqueue (rec.file, projectName, rec.durationSec);
+    };
+    uploader.start();
 }
 
 EarshotAudioProcessor::~EarshotAudioProcessor()
 {
+    takeWriter.onTakeSaved = nullptr;
     takeWriter.stop();
+    uploader.stop();
 }
 
 void EarshotAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)

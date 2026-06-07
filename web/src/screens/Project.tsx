@@ -1,19 +1,40 @@
+import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { findProject, fmtDuration, fmtRelative } from '../data';
+import { api, ApiTake } from '../api';
+import { fmtDuration, fmtRelative, fmtBytes } from '../data';
 import { coverGradient } from '../cover';
 
 export function Project() {
   const { id } = useParams();
-  const project = id ? findProject(id) : undefined;
+  const [takes, setTakes] = useState<ApiTake[] | null>(null);
+  const [selected, setSelected] = useState<ApiTake | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
-  if (!project) {
-    return (
-      <>
-        <p className="empty">project not found.</p>
-        <p className="empty"><Link to="/">back to library</Link></p>
-      </>
-    );
-  }
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const t = await api.takes(id);
+        if (cancelled) return;
+        setTakes(t);
+        setError(null);
+        // Auto-select the newest take on first load.
+        setSelected(s => s ?? t[0] ?? null);
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || 'failed to load');
+      }
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [id]);
+
+  if (error) return <p className="empty">{error}</p>;
+  if (!takes) return <p className="empty">loading…</p>;
+
+  const projectName = takes[0]?.project ?? id ?? 'project';
 
   return (
     <>
@@ -22,30 +43,58 @@ export function Project() {
       </h2>
 
       <div className="player">
-        <div className="cover" style={{ background: coverGradient(project.name) }} />
-        <button className="play-btn" aria-label="play">▶</button>
+        <div className="cover" style={{ background: coverGradient(projectName) }} />
+
         <h3 className="title" style={{ textAlign: 'center', marginTop: 0 }}>
-          {project.name}
+          {projectName}
         </h3>
-        <p className="meta" style={{ textAlign: 'center' }}>
-          {project.live ? 'live now' : `${project.takes.length} takes`}
-        </p>
+
+        {selected ? (
+          <>
+            <audio
+              ref={audioRef}
+              src={api.audioUrl(selected.id)}
+              controls
+              style={{ width: '100%', marginTop: 12, accentColor: 'var(--accent)' }}
+              preload="metadata"
+            />
+            <p className="meta" style={{ textAlign: 'center', marginTop: 10 }}>
+              {fmtDuration(selected.durationSec)} · {fmtBytes(selected.bytes)} · {fmtRelative(selected.createdAt)}
+            </p>
+          </>
+        ) : (
+          <p className="meta" style={{ textAlign: 'center' }}>
+            no takes yet
+          </p>
+        )}
       </div>
 
-      <h2 className="section-label" style={{ marginTop: 28 }}>takes</h2>
+      <h2 className="section-label" style={{ marginTop: 28 }}>
+        takes ({takes.length})
+      </h2>
 
-      {project.takes.length === 0 ? (
-        <p className="empty">no takes yet — hit play in ableton and snapshot.</p>
+      {takes.length === 0 ? (
+        <p className="empty">no takes yet — record one in ableton.</p>
       ) : (
         <ul className="take-list">
-          {project.takes.map(t => (
-            <li key={t.id}>
-              <span>{t.label}</span>
-              <span style={{ color: 'var(--text-muted)' }}>
-                {fmtDuration(t.durationSec)} · {fmtRelative(t.createdAt)}
-              </span>
-            </li>
-          ))}
+          {takes.map(t => {
+            const isSelected = selected?.id === t.id;
+            return (
+              <li
+                key={t.id}
+                onClick={() => setSelected(t)}
+                style={{
+                  cursor: 'pointer',
+                  color: isSelected ? 'var(--accent)' : undefined,
+                }}
+              >
+                <span>{new Date(t.createdAt).toLocaleString()}</span>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {fmtDuration(t.durationSec)} · {fmtRelative(t.createdAt)}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </>

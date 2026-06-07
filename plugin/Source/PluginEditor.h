@@ -30,6 +30,7 @@ private:
     void refreshTakes();
     juce::String renderTakesText (const std::vector<TakeRecord>&) const;
     void updateRecButton();
+    void refreshUploadStatus();
 
     EarshotAudioProcessor& processorRef;
     BrandLookAndFeel lnf;

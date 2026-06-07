@@ -34,6 +34,8 @@ target_sources(Earshot PRIVATE
     Source/CaptureBuffer.h
     Source/TakeWriter.cpp
     Source/TakeWriter.h
+    Source/Uploader.cpp
+    Source/Uploader.h
 )
 
 target_compile_definitions(Earshot PUBLIC

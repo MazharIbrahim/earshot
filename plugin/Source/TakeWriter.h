@@ -37,6 +37,9 @@ public:
     void setProjectName (const juce::String& name);
 
     std::function<void()> onTakesChanged;
+    // Fires from the writer thread immediately after a take is persisted.
+    // Receiver should not block (it runs synchronously on the writer thread).
+    std::function<void(const TakeRecord&)> onTakeSaved;
 
     static juce::File takesRoot();
 

@@ -124,14 +124,24 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
         });
     };
 
+    processorRef.getUploader().onStateChanged = [this]
+    {
+        juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EarshotAudioProcessorEditor> (this)]
+        {
+            if (sp != nullptr) sp->refreshUploadStatus();
+        });
+    };
+
     refreshTakes();
     updateRecButton();
+    refreshUploadStatus();
     startTimerHz (24); // smooth meter
 }
 
 EarshotAudioProcessorEditor::~EarshotAudioProcessorEditor()
 {
     processorRef.getTakeWriter().onTakesChanged = nullptr;
+    processorRef.getUploader().onStateChanged   = nullptr;
     setLookAndFeel (nullptr);
 }
 
@@ -234,6 +244,37 @@ void EarshotAudioProcessorEditor::refreshTakes()
     takesBody.setText (renderTakesText (t), juce::dontSendNotification);
     takesBody.setColour (juce::Label::textColourId,
                          t.empty() ? textMuted : text);
+}
+
+void EarshotAudioProcessorEditor::refreshUploadStatus()
+{
+    auto& u = processorRef.getUploader();
+    const int queued = u.getQueueDepth();
+
+    juce::String suffix;
+    juce::Colour col = textMuted;
+
+    switch (u.getState())
+    {
+        case Uploader::State::Idle:
+            suffix = queued > 0
+                ? juce::String::fromUTF8 (" · queued ") + juce::String (queued)
+                : juce::String::fromUTF8 (" · synced");
+            break;
+        case Uploader::State::Uploading:
+            suffix = juce::String::fromUTF8 ("  uploading…");
+            if (queued > 1) suffix << " (" << queued << ")";
+            col = accent;
+            break;
+        case Uploader::State::Failed:
+            suffix = juce::String::fromUTF8 (" · upload failed — retrying");
+            col = juce::Colour (0xffff5a3c);
+            break;
+    }
+
+    takesHeader.setText (juce::String ("recent takes") + suffix,
+                         juce::dontSendNotification);
+    takesHeader.setColour (juce::Label::textColourId, col);
 }
 
 juce::String EarshotAudioProcessorEditor::renderTakesText (const std::vector<TakeRecord>& list) const
