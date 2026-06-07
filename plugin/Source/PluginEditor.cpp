@@ -84,11 +84,12 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     recButton.onClick = [this]
     {
-        // Toggle based on user's last expressed intent, not the actual
-        // capturing flag — the audio thread updates that asynchronously,
-        // which previously caused the button label to lag by one click.
-        const bool nowRecording = ! processorRef.wantsToRecord();
-        processorRef.setRecording (nowRecording);
+        // One toggle covers all three states:
+        //  - idle      → arm (waiting for play)
+        //  - armed     → cancel the arm
+        //  - recording → force-stop early (transport keeps playing,
+        //                we just close the take and disarm)
+        processorRef.setArmed (! processorRef.isArmed());
         updateRecButton();
     };
     addAndMakeVisible (recButton);
@@ -177,13 +178,19 @@ void EarshotAudioProcessorEditor::resized()
 void EarshotAudioProcessorEditor::timerCallback()
 {
     meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
-    updateRecButton(); // also covers any state changes from non-UI sources
+    updateRecButton(); // transport-driven state changes need a refresh too
 
     if (processorRef.isRecording())
     {
         const auto frames = processorRef.getFramesCapturedThisTake();
         statusLabel.setText (juce::String::fromUTF8 ("recording · ")
                              + juce::String (frames) + " frames",
+                             juce::dontSendNotification);
+        statusLabel.setColour (juce::Label::textColourId, accent);
+    }
+    else if (processorRef.isWaitingForPlay())
+    {
+        statusLabel.setText (juce::String::fromUTF8 ("armed · waiting for play"),
                              juce::dontSendNotification);
         statusLabel.setColour (juce::Label::textColourId, accent);
     }
@@ -204,16 +211,19 @@ void EarshotAudioProcessorEditor::timerCallback()
 
 void EarshotAudioProcessorEditor::updateRecButton()
 {
-    // Reflect the user's intent, not the (lagging) audio-thread state.
-    const bool wantsRec = processorRef.wantsToRecord();
-    if (wantsRec)
+    if (processorRef.isRecording())
     {
         recButton.setButtonText (juce::String::fromUTF8 ("■  stop"));
         recButton.setToggleState (true, juce::dontSendNotification);
     }
+    else if (processorRef.isArmed())
+    {
+        recButton.setButtonText (juce::String::fromUTF8 ("◌  armed — cancel"));
+        recButton.setToggleState (true, juce::dontSendNotification);
+    }
     else
     {
-        recButton.setButtonText (juce::String::fromUTF8 ("●  record"));
+        recButton.setButtonText (juce::String::fromUTF8 ("●  record next take"));
         recButton.setToggleState (false, juce::dontSendNotification);
     }
 }

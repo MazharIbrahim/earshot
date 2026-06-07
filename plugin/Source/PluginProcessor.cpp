@@ -56,22 +56,34 @@ void EarshotAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         peakL.store (pl);
         peakR.store (pr);
 
-        // Manual REC: writer is armed only when the user toggles record.
-        const bool wantRecord = recordRequested.load (std::memory_order_acquire);
-        if (wantRecord && ! prevRecording)
+        // Arm-and-wait: a take runs only when the user has armed AND the
+        // host transport is playing. Transport stop auto-ends and unarms.
+        bool hostPlaying = false;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+                hostPlaying = pos->getIsPlaying();
+
+        const bool armed       = armRequested.load (std::memory_order_acquire);
+        const bool shouldCapture = armed && hostPlaying;
+
+        if (shouldCapture && ! prevCapturing)
         {
             framesCapturedThisTake.store (0);
             capturing.store (true, std::memory_order_release);
             takeWriter.arm();
         }
-        else if (! wantRecord && prevRecording)
+        else if (! shouldCapture && prevCapturing)
         {
             capturing.store (false, std::memory_order_release);
             takeWriter.disarm();
+            // Auto-unarm: transport stopping ends both the take and the
+            // armed state, so the next play-through won't be captured
+            // unless the user hits record again.
+            armRequested.store (false, std::memory_order_release);
         }
-        prevRecording = wantRecord;
+        prevCapturing = shouldCapture;
 
-        if (wantRecord)
+        if (shouldCapture)
         {
             const int pushed = captureBuffer.push (l, r, n);
             framesCapturedThisTake.fetch_add (pushed);

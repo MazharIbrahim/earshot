@@ -41,13 +41,12 @@ public:
 
     bool isCapturing() const { return capturing.load(); }
 
-    // Manual REC toggle from the UI. The audio thread observes this via
-    // an atomic flag on the next processBlock and arms/disarms the writer.
-    void setRecording (bool shouldRecord) { recordRequested.store (shouldRecord); }
+    // Arm-and-wait recording: when armed, the audio thread starts a take
+    // the next time the host transport plays, and ends it when transport stops.
+    void setArmed (bool shouldArm) { armRequested.store (shouldArm); }
+    bool isArmed() const     { return armRequested.load(); }
     bool isRecording() const { return capturing.load(); }
-    // The user's intent (what they last clicked) — flips immediately on click
-    // so the button label can stay in sync without waiting for the audio thread.
-    bool wantsToRecord() const { return recordRequested.load(); }
+    bool isWaitingForPlay() const { return armRequested.load() && ! capturing.load(); }
 
     // Diagnostic: total frames passed through the ring buffer for this take.
     juce::int64 getFramesCapturedThisTake() const { return framesCapturedThisTake.load(); }
@@ -69,9 +68,9 @@ private:
 
     CaptureBuffer captureBuffer;
     TakeWriter    takeWriter;
-    std::atomic<bool> capturing       { false };
-    std::atomic<bool> recordRequested { false };
-    bool prevRecording { false };
+    std::atomic<bool> capturing    { false };
+    std::atomic<bool> armRequested { false };
+    bool prevCapturing { false };
 
     // Atomic peak levels updated each processBlock.
     std::atomic<float> peakL { 0.0f };
