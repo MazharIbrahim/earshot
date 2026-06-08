@@ -254,6 +254,23 @@ app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
   next();
 });
 
+// Prune DB rows whose audio doesn't exist in storage. This happens when
+// uploads silently failed in older code paths (the EPIPE era). Idempotent.
+async function pruneOrphans() {
+  const storage = await getStorage();
+  if (storage.kind === 'local') return; // local always-present
+  const rows = db.prepare('SELECT id, filename, opus_filename FROM takes').all();
+  let pruned = 0;
+  for (const r of rows) {
+    const hasOpus = r.opus_filename ? await storage.exists(r.opus_filename) : false;
+    const hasWav  = await storage.exists(r.filename);
+    if (hasOpus || hasWav) continue;
+    db.prepare('DELETE FROM takes WHERE id = ?').run(r.id);
+    pruned++;
+  }
+  if (pruned > 0) console.log(`[earshot] pruned ${pruned} orphan take row(s)`);
+}
+
 // Push every local audio file referenced by the DB to remote storage if
 // it isn't already there. Idempotent — runs at startup so cloud is in
 // sync after a migration or when the storage backend changes.
@@ -321,5 +338,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   // Fire-and-forget; logs progress.
   backfillOpus()
     .then(() => backfillCloud())
+    .then(() => pruneOrphans())
     .catch(e => console.error('[earshot] backfill error:', e));
 });
