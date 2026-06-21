@@ -2,58 +2,92 @@
 
 > Your studio, in your pocket.
 
-A VST3 plugin for Ableton (and any DAW) that streams your work-in-progress to
-your phone — live while you're producing, and as versioned snapshots you can
-listen to anywhere, even after Ableton is closed.
+A VST3 plugin for Ableton Live (and any DAW) that records snapshots of your
+in-progress tracks and streams them to your phone — for listening in the car,
+on a walk, sharing with collaborators, or A/B-ing versions on a real sound
+system. No app required on the phone: open a URL.
 
-See [docs/plan.md](docs/plan.md) for the full design.
+The product premise: **version history for your work-in-progress music**.
 
-## Layout
+## How it works
 
 ```
-plugin/        JUCE VST3 (C++)
-  Source/      PluginProcessor, PluginEditor, BrandLookAndFeel
-  CMakeLists.txt
-web/           Mobile PWA (Vite + React + TypeScript)
-  src/screens/ Library, Project, SignIn
-backend/       (TBD) Supabase + LiveKit Cloud config
+┌─ Plugin (your DAW's master bus)
+│   • Captures stereo audio on demand (REC armed → next play-through)
+│   • Uploads WAV to backend on stop, with idempotency
+│
+├─ Backend (Node + Express)
+│   • Transcodes WAV → Opus (~10x smaller, broad browser support)
+│   • Pushes Opus to Cloudflare R2 (free egress, perfect for streaming)
+│   • Stores metadata in Supabase Postgres
+│
+└─ PWA (mobile/desktop browser, no install)
+    • Lists projects + takes
+    • A/B player with sync-position swap between two takes
+    • Editable labels per take
+    • Share links (?t=<takeId>) that auto-play
+    • Magic-link auth (per-user private libraries)
+```
+
+## Tech
+
+- **Plugin:** JUCE 7.0.12, C++17, CMake. Builds VST3 + AU on macOS/Windows/Linux.
+- **Backend:** Node 20, Express, ffmpeg (libopus), AWS S3 SDK (multipart uploads to R2).
+- **PWA:** Vite + React + TypeScript, PWA manifest + service worker.
+- **Storage:** Cloudflare R2 (audio), Supabase Postgres (metadata), Supabase Storage (avatars later).
+- **Auth (in progress):** Supabase Auth, email magic links.
+
+## Repo layout
+
+```
+plugin/        JUCE VST3 — C++
+  Source/      PluginProcessor, PluginEditor, CaptureBuffer, TakeWriter,
+               Uploader, HealthPoller, TakesPoller, brand UI, QR overlay
+backend/       Node + Express
+  src/         server, db (sqlite|supabase), storage (local|r2|supabase),
+               transcode (ffmpeg), tunnel (cloudflared)
+web/           Vite + React + TS PWA
+  src/         api client, screens (Library, Project, SignIn), brand tokens
+docs/          plan.md, CLOUD.md, supabase-schema.sql
 third_party/
-  JUCE/        Submodule, pinned to 7.0.12
-docs/
+  JUCE/        submodule, pinned to 7.0.12
+  qrcodegen/   vendored nayuki QR encoder (used for the plugin's QR modal)
 ```
 
-## Dev — plugin
+## Quick start (development)
 
-Requires CMake 3.22+ and Xcode (CLI tools sufficient on macOS).
+Requires Node 20+, CMake 3.22+, Xcode CLT (macOS) or MSVC (Windows), ffmpeg.
 
 ```bash
+git clone --recursive https://github.com/MazharIbrahim/earshot.git
+cd earshot
+
+# Build plugin (installs to ~/Library/Audio/Plug-Ins/VST3 on macOS)
 cd plugin
 cmake -B build -G Xcode
 cmake --build build --config Debug --target Earshot_VST3
-```
+cd ..
 
-The build installs `Earshot.vst3` into
-`~/Library/Audio/Plug-Ins/VST3/`. Restart Ableton or rescan plugins.
-
-## Dev — PWA
-
-Requires Node 20+.
-
-```bash
-cd web
+# Backend
+cd backend
+cp .env.example .env   # fill in R2 + Supabase credentials
 npm install
-npm run dev   # http://localhost:5173
+npm start              # listens on http://localhost:8787
+
+# PWA
+cd ../web
+npm install
+npm run dev            # http://localhost:5173
 ```
 
 ## Status
 
-MVP scaffold:
+Pre-launch. Core loop works end-to-end with cloud storage + database. Working
+on: hosted backend, auth, distribution.
 
-- [x] VST3 builds and loads in Ableton with brand UI
-- [x] PWA builds with manifest + service worker
-- [ ] Audio tap → Opus encode → WebRTC live publish
-- [ ] Real-time snapshot capture + upload
-- [ ] Account auth (Supabase magic link)
-- [ ] Live relay (LiveKit Cloud)
-- [ ] Snapshot storage (S3/R2)
-```
+See [`docs/plan.md`](docs/plan.md) for the product roadmap and
+[`docs/CLOUD.md`](docs/CLOUD.md) for cloud migration notes.
+
+## License
+
+MIT (see [LICENSE](LICENSE)).

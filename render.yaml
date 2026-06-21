@@ -1,0 +1,48 @@
+# Render blueprint — connect this repo and Render reads this to provision
+# everything in one click. https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: earshot-backend
+    runtime: node
+    region: oregon         # or 'frankfurt' if your users are EU-heavy
+    plan: starter          # $7/mo, always-on. Switch to 'free' for evaluation.
+    rootDir: backend
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      npm ci
+    startCommand: node src/server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+
+    envVars:
+      - key: NODE_VERSION
+        value: 20.20.2
+      - key: PORT
+        value: 8787
+
+      # Storage (set these in Render dashboard, mark as secret)
+      - key: EARSHOT_STORAGE
+        value: r2
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        value: earshot-takes
+      - key: R2_PUBLIC_BASE
+        sync: false
+
+      # Database
+      - key: EARSHOT_DB
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+
+      # Disable the dev tunnel in production
+      - key: EARSHOT_TUNNEL
+        value: "off"
