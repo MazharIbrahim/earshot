@@ -5,6 +5,7 @@
 #include "BrandLookAndFeel.h"
 #include "TakeWriter.h"
 #include "TakesPoller.h"
+#include "SignInFlow.h"
 
 class LevelMeter : public juce::Component
 {
@@ -89,7 +90,8 @@ private:
     juce::Label  statusLabel;
     LevelMeter   meter;
     juce::TextButton recButton  { "record" };
-    juce::TextButton openPhoneButton { "open on phone" };
+    juce::TextButton openPhoneButton { "sign in" };
+    SignInFlow signInFlow;
     juce::Label  takesHeader;
     TakesListComponent takesList;
     juce::Label  urlPrompt;

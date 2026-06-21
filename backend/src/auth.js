@@ -15,16 +15,38 @@ const JWKS = SUPABASE_URL
   ? createRemoteJWKSet(new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`))
   : null;
 
+// HS256 secret for plugin-minted JWTs. Same secret on sign + verify; if
+// missing we fall back to the service key so dev "just works".
+function pluginSecret() {
+  const s = process.env.PLUGIN_JWT_SECRET || process.env.SUPABASE_SERVICE_KEY || '';
+  return s ? new TextEncoder().encode(s) : null;
+}
+
 // In dev (no auth required), set EARSHOT_AUTH=off to bypass.
 const AUTH_ENABLED = (process.env.EARSHOT_AUTH || 'on').toLowerCase() !== 'off';
 
+// We accept two flavours of token:
+//   1. Supabase Auth JWTs (signed with the project's JWT secret, served
+//      via JWKS) — issued to PWA users who clicked a magic link.
+//   2. Plugin JWTs (HS256 with PLUGIN_JWT_SECRET) — issued via the
+//      device-link flow so the plugin can sign in. Both end up with
+//      the same `sub` (auth.users.id) so downstream code is identical.
 export async function verifyJwt(token) {
+  // Plugin tokens carry { plugin: true }. Try the cheap local-HS256 path
+  // first; on any failure, fall back to JWKS for Supabase-issued tokens.
+  const secret = pluginSecret();
+  if (secret) {
+    try {
+      const { payload } = await jwtVerify(token, secret, { algorithms: ['HS256'] });
+      if (payload?.plugin === true) return payload;
+    } catch { /* not a plugin token; try Supabase below */ }
+  }
+
   if (!JWKS) throw new Error('SUPABASE_URL not set; cannot verify JWTs');
   const { payload } = await jwtVerify(token, JWKS, {
-    // 'authenticated' is the default role Supabase uses for signed-in users.
     requiredClaims: ['sub'],
   });
-  return payload; // { sub, email, role, aud, exp, ... }
+  return payload;
 }
 
 // Express middleware: pulls Bearer token, verifies, attaches req.userId.

@@ -250,12 +250,37 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     openPhoneButton.onClick = [this]
     {
-        auto base = processorRef.getHealthPoller().getPublicUrl();
-        if (base.isEmpty()) return;
-        auto deepLink = base + "/p/" + slugify (processorRef.getProjectName());
-        showQrFor (deepLink);
+        if (processorRef.getAuthToken().isEmpty())
+        {
+            // No token → start device-link flow.
+            signInFlow.start (juce::URL (processorRef.getBackendBase()));
+        }
+        else
+        {
+            // Signed in → just deep-link to the project page on the phone.
+            auto base = processorRef.getBackendBase();
+            auto deepLink = base + "/p/" + slugify (processorRef.getProjectName());
+            showQrFor (deepLink);
+        }
     };
     addAndMakeVisible (openPhoneButton);
+
+    signInFlow.onLinked = [this] (const juce::String& token)
+    {
+        processorRef.setAuthToken (token);
+        qrOverlay.setVisible (false);
+        // Force a refresh on every poller now that we have auth.
+        refreshTakes();
+        refreshPublicUrl();
+    };
+    signInFlow.onExpired = [this]
+    {
+        qrOverlay.setVisible (false);
+    };
+    signInFlow.onError = [this] (const juce::String&)
+    {
+        qrOverlay.setVisible (false);
+    };
 
     takesHeader.setText ("recent takes", juce::dontSendNotification);
     takesHeader.setFont (monoFont (11.0f));
@@ -369,6 +394,20 @@ void EarshotAudioProcessorEditor::timerCallback()
 {
     meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
     updateRecButton();
+
+    // While the sign-in flow is mid-poll, keep the QR overlay showing
+    // the device-link URL. The poller fires onLinked when paired, which
+    // hides the overlay.
+    if (signInFlow.isThreadRunning() && processorRef.getAuthToken().isEmpty())
+    {
+        auto url = signInFlow.getRedeemUrl();
+        if (url.isNotEmpty() && ! qrOverlay.isVisible())
+            showQrFor (url);
+    }
+
+    // Keep the "open on phone" button label in sync with auth state.
+    openPhoneButton.setButtonText (
+        processorRef.getAuthToken().isEmpty() ? "sign in" : "open on phone");
 
     if (processorRef.isRecording())
     {

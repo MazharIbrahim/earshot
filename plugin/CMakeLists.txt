@@ -40,6 +40,8 @@ target_sources(Earshot PRIVATE
     Source/HealthPoller.h
     Source/TakesPoller.cpp
     Source/TakesPoller.h
+    Source/SignInFlow.cpp
+    Source/SignInFlow.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/qrcodegen/c/qrcodegen.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/qrcodegen/c/qrcodegen.h
 )

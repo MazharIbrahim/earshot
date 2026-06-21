@@ -2,6 +2,7 @@ import { Routes, Route, Link } from 'react-router-dom';
 import { Library } from './screens/Library';
 import { Project } from './screens/Project';
 import { SignIn } from './screens/SignIn';
+import { Link as LinkPlugin } from './screens/Link';
 import { AuthProvider, useAuth, signOut } from './auth';
 
 function Shell() {
@@ -35,6 +36,7 @@ function Shell() {
       <Routes>
         <Route path="/" element={<Library />} />
         <Route path="/p/:id" element={<Project />} />
+        <Route path="/link" element={<LinkPlugin />} />
       </Routes>
     </div>
   );

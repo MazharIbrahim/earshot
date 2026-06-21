@@ -24,6 +24,7 @@ import { transcodeToOpus } from './transcode.js';
 import { getStorage } from './storage.js';
 import { openDb } from './db.js';
 import { requireAuth, maybeAuth } from './auth.js';
+import { mountDeviceLink } from './devicelink.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -70,6 +71,8 @@ app.get('/healthz', (_req, res) => res.json({
   tunnel: tunnelStatus.state,
   publicUrl: tunnelStatus.publicUrl,
 }));
+
+mountDeviceLink(app);
 
 // POST /takes — multipart: file=audio, fields: project, durationSec.
 // Optional header X-Earshot-Idempotency: a client-chosen unique string per
