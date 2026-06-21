@@ -305,7 +305,7 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
 
     copyButton.onClick = [this]
     {
-        auto url = processorRef.getHealthPoller().getPublicUrl();
+        auto url = processorRef.getBackendBase();
         if (url.isNotEmpty()) juce::SystemClipboard::copyTextToClipboard (url);
     };
     addAndMakeVisible (copyButton);
@@ -455,24 +455,18 @@ void EarshotAudioProcessorEditor::refreshTakes()
 
 void EarshotAudioProcessorEditor::refreshPublicUrl()
 {
-    auto url = processorRef.getHealthPoller().getPublicUrl();
-    if (url.isEmpty())
-    {
-        urlValue.setText (juce::String::fromUTF8 ("connecting…"), juce::dontSendNotification);
-        urlValue.setColour (juce::Label::textColourId, textMuted);
-        copyButton.setEnabled (false);
-        openPhoneButton.setEnabled (false);
-    }
-    else
-    {
-        auto display = url.startsWith ("https://") ? url.substring (8)
-                     : url.startsWith ("http://")  ? url.substring (7)
-                     : url;
-        urlValue.setText (display, juce::dontSendNotification);
-        urlValue.setColour (juce::Label::textColourId, accent);
-        copyButton.setEnabled (true);
-        openPhoneButton.setEnabled (true);
-    }
+    // We now always know the backend URL — it's whatever processor's
+    // backendBase is set to (app.earshot.cc in production, configurable
+    // in settings). The old "connecting…" state was tied to discovery
+    // via HealthPoller's tunnel URL, which we no longer use in prod.
+    auto url = processorRef.getBackendBase();
+    auto display = url.startsWith ("https://") ? url.substring (8)
+                 : url.startsWith ("http://")  ? url.substring (7)
+                 : url;
+    urlValue.setText (display, juce::dontSendNotification);
+    urlValue.setColour (juce::Label::textColourId, accent);
+    copyButton.setEnabled (true);
+    openPhoneButton.setEnabled (true);
 }
 
 void EarshotAudioProcessorEditor::refreshUploadStatus()

@@ -67,7 +67,7 @@ function buildSqlite() {
         SELECT id, project, project_id AS projectId,
                duration_sec AS durationSec, bytes, created_at AS createdAt,
                opus_filename AS opusFilename
-        FROM takes WHERE idempotency_key = ? AND (user_id = ? OR user_id IS NULL)
+        FROM takes WHERE idempotency_key = ? AND user_id IS ?
       `).get(key, userId ?? null);
       return row || null;
     },
@@ -76,7 +76,7 @@ function buildSqlite() {
       const rows = db.prepare(`
         SELECT project_id AS projectId, project,
                COUNT(*) AS takes, MAX(created_at) AS latestCreatedAt
-        FROM takes WHERE user_id = ? OR user_id IS NULL
+        FROM takes WHERE user_id IS ?
         GROUP BY project_id, project
         ORDER BY latestCreatedAt DESC
       `).all(userId ?? null);
@@ -88,7 +88,7 @@ function buildSqlite() {
         SELECT id, project, project_id AS projectId,
                duration_sec AS durationSec, bytes, note,
                created_at AS createdAt
-        FROM takes WHERE project_id = ? AND (user_id = ? OR user_id IS NULL)
+        FROM takes WHERE project_id = ? AND user_id IS ?
         ORDER BY created_at DESC
       `).all(projectId, userId ?? null);
     },
@@ -105,14 +105,14 @@ function buildSqlite() {
 
     updateNote(id, note, userId) {
       const res = db.prepare(
-        'UPDATE takes SET note = ? WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
+        'UPDATE takes SET note = ? WHERE id = ? AND user_id IS ?'
       ).run(note, id, userId ?? null);
       return res.changes > 0;
     },
 
     deleteTake(id, userId) {
       const res = db.prepare(
-        'DELETE FROM takes WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
+        'DELETE FROM takes WHERE id = ? AND user_id IS ?'
       ).run(id, userId ?? null);
       return res.changes > 0;
     },
@@ -180,12 +180,13 @@ function buildSupabase() {
     user_id: userId ?? null,
   });
 
-  // PostgREST filter for "owned by this user or unowned (pre-auth data)".
-  // Unowned rows exist from before the user_id column was added; this lets
-  // them remain visible to the developer's account until we backfill.
+  // Strict per-user filter. NEVER include user_id IS NULL — that would
+  // leak ownerless pre-auth rows to every signed-in user. Anonymous
+  // requests (userId === null, dev mode only) see ownerless rows only,
+  // never another user's data.
   const ownerFilter = (userId) =>
     userId
-      ? `or=(user_id.eq.${encodeURIComponent(userId)},user_id.is.null)`
+      ? `user_id=eq.${encodeURIComponent(userId)}`
       : 'user_id=is.null';
 
   return {
