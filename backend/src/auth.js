@@ -31,9 +31,11 @@ export async function verifyJwt(token) {
 // 401s on missing or invalid; 403s if the token is present but has no sub.
 export function requireAuth(req, res, next) {
   if (!AUTH_ENABLED) {
-    // Dev pass-through. Use a single canonical 'dev user' id so all data
-    // for the current developer lands in one bucket.
-    req.userId = 'dev-user';
+    // Dev pass-through. userId stays null — the DB layer treats null as
+    // "ownerless / pre-auth data" and both backends include those rows
+    // when filtering. Anything inserted in dev mode is also ownerless,
+    // which keeps test data out of any real user's library.
+    req.userId = null;
     return next();
   }
 
@@ -57,7 +59,7 @@ export function requireAuth(req, res, next) {
 // Optional auth — attaches userId if present, but doesn't reject if missing.
 // Used by share-link routes that can be public AND owner-visible.
 export function maybeAuth(req, _res, next) {
-  if (!AUTH_ENABLED) { req.userId = 'dev-user'; return next(); }
+  if (!AUTH_ENABLED) { req.userId = null; return next(); }
   const header = req.get('authorization') || '';
   const m = header.match(/^Bearer\s+(.+)$/i);
   if (!m) return next();
