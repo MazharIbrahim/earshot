@@ -39,7 +39,10 @@ private:
         juce::File   file;
         juce::String project;
         double       durationSec;
+        int          attempts { 0 };  // failures so far for this job
     };
+
+    static constexpr int maxAttempts = 5;
 
     void run() override;
     bool postOne (const Job&);

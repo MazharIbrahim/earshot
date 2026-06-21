@@ -61,9 +61,8 @@ async function buildR2Storage() {
   if (missing.length) {
     throw new Error(`R2 storage requested but missing env: ${missing.join(', ')}`);
   }
-  const { S3Client, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } =
+  const { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } =
     await import('@aws-sdk/client-s3');
-  const { Upload } = await import('@aws-sdk/lib-storage');
 
   const client = new S3Client({
     region: 'auto',
@@ -79,18 +78,35 @@ async function buildR2Storage() {
   return {
     kind: 'r2',
     async put(key, source, contentType) {
-      // lib-storage's Upload class handles multipart automatically and
-      // sets Content-Length correctly for streams — avoids the EPIPE we
-      // were hitting on bare PutObjectCommand for >5 MB streamed bodies.
-      const Body = Buffer.isBuffer(source) ? source : fs.createReadStream(source);
-      const upload = new Upload({
-        client,
-        params: { Bucket, Key: key, Body, ContentType: contentType },
-        queueSize: 4,           // up to 4 parts in parallel
-        partSize:  5 * 1024 * 1024, // 5 MB parts (the S3 minimum)
-        leavePartsOnError: false,
-      });
-      await upload.done();
+      // Buffer the whole file so PutObjectCommand sends a single
+      // non-chunked PUT with a real Content-Length. R2 EPIPEs aggressively
+      // on chunked uploads. Max take is ~30 MB so memory is fine.
+      const Body = Buffer.isBuffer(source)
+        ? source
+        : await fs.promises.readFile(source);
+
+      // Retry transient R2 errors. Cloudflare returns "internal
+      // connectivity issue" and EPIPE intermittently; backing off and
+      // re-PUTting almost always succeeds on the second try.
+      const maxAttempts = 4;
+      let lastErr;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          await client.send(new PutObjectCommand({
+            Bucket, Key: key, Body, ContentType: contentType,
+            ContentLength: Body.length,
+          }));
+          if (attempt > 1) console.log(`[earshot] r2 put ${key} succeeded on attempt ${attempt}`);
+          return;
+        } catch (e) {
+          lastErr = e;
+          if (attempt === maxAttempts) break;
+          const delay = 250 * Math.pow(2, attempt - 1); // 250 / 500 / 1000 ms
+          console.log(`[earshot] r2 put ${key} attempt ${attempt} failed: ${e.message}; retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      throw lastErr;
     },
     url(key) {
       // Public custom-domain URL. R2 free egress means we can serve direct

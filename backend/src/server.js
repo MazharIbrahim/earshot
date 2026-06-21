@@ -47,6 +47,8 @@ db.exec(`
 // Best-effort migrations on existing DBs.
 try { db.exec('ALTER TABLE takes ADD COLUMN opus_filename TEXT'); } catch {}
 try { db.exec('ALTER TABLE takes ADD COLUMN note TEXT'); } catch {}
+try { db.exec('ALTER TABLE takes ADD COLUMN idempotency_key TEXT'); } catch {}
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_takes_idem ON takes (idempotency_key) WHERE idempotency_key IS NOT NULL'); } catch {}
 
 const slug = (s) => (s || 'untitled')
   .toLowerCase().trim()
@@ -85,9 +87,29 @@ app.get('/healthz', (_req, res) => res.json({
   publicUrl: tunnelStatus.publicUrl,
 }));
 
-// POST /takes — multipart: file=audio, fields: project, durationSec
+// POST /takes — multipart: file=audio, fields: project, durationSec.
+// Optional header X-Earshot-Idempotency: a client-chosen unique string per
+// take. If the same key arrives twice (because the plugin retried after a
+// dropped response), we treat the second POST as a no-op and return the
+// existing take's metadata. This is the only thing standing between a
+// flaky upload and 47 duplicate rows for one recording.
 app.post('/takes', upload.single('audio'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'audio file required' });
+
+  const idemKey = (req.get('x-earshot-idempotency') || '').slice(0, 200) || null;
+
+  if (idemKey) {
+    const existing = db.prepare(
+      'SELECT id, project, project_id AS projectId, duration_sec AS durationSec, bytes, created_at AS createdAt FROM takes WHERE idempotency_key = ?'
+    ).get(idemKey);
+    if (existing) {
+      // Already have it. Throw away the just-uploaded WAV so we don't
+      // accumulate orphan files on disk.
+      try { fs.unlinkSync(path.join(AUDIO_DIR, req.file.filename)); } catch {}
+      console.log(`[earshot] duplicate upload (idempotency=${idemKey}) — returning existing ${existing.id}`);
+      return res.json({ ...existing, opus: true, deduped: true });
+    }
+  }
 
   const project = (req.body.project || 'Untitled').toString().slice(0, 200);
   const projectId = slug(project);
@@ -128,10 +150,10 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
 
   db.prepare(`
     INSERT INTO takes (id, project, project_id, filename, opus_filename,
-                       duration_sec, bytes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       duration_sec, bytes, created_at, idempotency_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, project, projectId, req.file.filename, opusFilename,
-         duration, req.file.size, Date.now());
+         duration, req.file.size, Date.now(), idemKey);
 
   res.json({
     id,

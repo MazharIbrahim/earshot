@@ -86,9 +86,32 @@ void Uploader::run()
         }
         else
         {
-            // Retry with backoff. Don't pop; we'll try again.
-            for (int i = 0; i < 50 && ! threadShouldExit(); ++i)
-                wait (100);
+            // Bump attempts. After maxAttempts, drop the job rather than
+            // retrying forever — a stuck job would starve later takes and
+            // could still create duplicates server-side if the timeout
+            // happens to lie about a successful POST.
+            bool drop = false;
+            {
+                const juce::ScopedLock lock (queueLock);
+                if (! queue.empty())
+                {
+                    queue.front().attempts++;
+                    if (queue.front().attempts >= maxAttempts)
+                    {
+                        juce::Logger::writeToLog ("[Earshot] dropping job after "
+                            + juce::String (maxAttempts) + " attempts: "
+                            + queue.front().file.getFileName());
+                        queue.pop_front();
+                        drop = true;
+                    }
+                }
+            }
+            if (! drop)
+            {
+                // Backoff: 5 seconds between attempts.
+                for (int i = 0; i < 50 && ! threadShouldExit(); ++i)
+                    wait (100);
+            }
         }
     }
 }
@@ -110,12 +133,23 @@ bool Uploader::postOne (const Job& job)
         .withParameter ("durationSec", juce::String (job.durationSec, 3))
         .withFileToUpload ("audio", job.file, "audio/wav");
 
+    // Idempotency key = the file's full path. Filenames already encode the
+    // project + recording timestamp so collisions are effectively impossible
+    // across takes on this machine.
+    const auto idemKey = job.file.getFullPathName();
+
     juce::StringPairArray responseHeaders;
     int statusCode = 0;
 
+    // 120s timeout — enough for big WAV uploads + ffmpeg transcode + R2
+    // multipart push. The previous 15s was shorter than the actual end-
+    // to-end time on a 25 MB take, so the plugin gave up while the server
+    // was still working, triggering a retry. Combined with idempotency
+    // (header below) this fully kills the duplicate-row loop.
     auto stream = url.createInputStream (
         juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
-            .withConnectionTimeoutMs (15000)
+            .withConnectionTimeoutMs (120000)
+            .withExtraHeaders ("X-Earshot-Idempotency: " + idemKey)
             .withResponseHeaders (&responseHeaders)
             .withStatusCode (&statusCode));
 
