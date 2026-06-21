@@ -74,6 +74,136 @@ app.get('/healthz', (_req, res) => res.json({
 
 mountDeviceLink(app);
 
+// --- Direct-to-R2 upload flow ------------------------------------------
+//
+// Render Free has a 100s request timeout. A 4-min stereo WAV (~46 MB)
+// on a typical home upload doesn't fit. So the plugin uploads straight
+// to R2 with a presigned PUT URL, never routing the audio bytes
+// through Render. Two small JSON requests bracket the big PUT.
+//
+//   1. POST /takes/upload-url  → backend mints { takeId, uploadUrl }
+//   2. plugin PUTs WAV to uploadUrl
+//   3. POST /takes/upload-complete → backend inserts the take row
+//
+// Idempotency from the X-Earshot-Idempotency header still applies to
+// the upload-url step; retrying a complete is a no-op via the same key.
+
+app.post('/takes/upload-url', requireAuth, async (req, res) => {
+  const project = (req.body?.project || 'Untitled').toString().slice(0, 200);
+  const projectId = slug(project);
+  const duration = Number(req.body?.durationSec) || 0;
+  const idemKey = (req.get('x-earshot-idempotency') || '').slice(0, 200) || null;
+
+  if (idemKey) {
+    const existing = await db.findByIdempotency(idemKey, req.userId);
+    if (existing) {
+      return res.json({
+        deduped: true,
+        takeId: existing.id,
+        project: existing.project,
+        projectId: existing.projectId,
+        durationSec: existing.durationSec,
+        createdAt: existing.createdAt,
+      });
+    }
+  }
+
+  const takeId = nanoid();
+  const wavKey = `${takeId}.wav`;
+  const storage = await getStorage();
+
+  if (!storage.presignPut) {
+    return res.status(501).json({ error: 'storage backend does not support presigned uploads' });
+  }
+  try {
+    const uploadUrl = await storage.presignPut(wavKey, 'audio/wav');
+    res.json({
+      takeId,
+      wavKey,
+      uploadUrl,
+      project, projectId, durationSec: duration,
+      idempotencyKey: idemKey,
+    });
+  } catch (e) {
+    console.error('[earshot] presign failed:', e.message);
+    res.status(500).json({ error: 'presign failed' });
+  }
+});
+
+app.post('/takes/upload-complete', requireAuth, async (req, res) => {
+  const body = req.body || {};
+  const takeId = String(body.takeId || '');
+  const wavKey = String(body.wavKey || `${takeId}.wav`);
+  const project = (body.project || 'Untitled').toString().slice(0, 200);
+  const projectId = slug(project);
+  const duration = Number(body.durationSec) || 0;
+  const bytes = Number(body.bytes) || 0;
+  const idemKey = (body.idempotencyKey || null) || null;
+
+  if (!takeId) return res.status(400).json({ error: 'takeId required' });
+
+  // Belt and suspenders: verify the object actually landed in R2 before
+  // we add the DB row. Otherwise a half-aborted upload would create a
+  // ghost take that 404s on play.
+  const storage = await getStorage();
+  if (!(await storage.exists(wavKey))) {
+    return res.status(409).json({ error: 'upload not found in storage', wavKey });
+  }
+
+  const now = Date.now();
+  try {
+    await db.insertTake({
+      id: takeId, project, projectId,
+      filename: wavKey,
+      opusFilename: null,    // backend transcodes async (see below)
+      durationSec: duration,
+      bytes,
+      createdAt: now,
+      idempotencyKey: idemKey,
+    }, req.userId);
+  } catch (e) {
+    // PRIMARY KEY (id) or UNIQUE (idempotency_key) collision means the
+    // upload was already confirmed once; treat as a successful retry.
+    if (/duplicate|unique|constraint/i.test(e.message)) {
+      return res.json({ takeId, deduped: true });
+    }
+    throw e;
+  }
+
+  res.json({
+    id: takeId, project, projectId,
+    durationSec: duration, bytes,
+    opus: false,
+    createdAt: now,
+  });
+
+  // Best-effort async transcode. Free-tier Render struggles but it'll
+  // eventually finish; until it does, the audio endpoint serves the WAV.
+  // If this fails the take is still usable, just bigger to stream.
+  (async () => {
+    const wavPath = path.join(AUDIO_DIR, wavKey);
+    const opusKey = wavKey.replace(/\.[^.]+$/, '') + '.opus';
+    const opusPath = path.join(AUDIO_DIR, opusKey);
+    try {
+      // Download the WAV from R2 to local disk for ffmpeg.
+      const r = await fetch(storage.url(wavKey));
+      if (!r.ok) throw new Error(`download ${wavKey} → ${r.status}`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      await fs.promises.writeFile(wavPath, buf);
+
+      await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
+      await storage.put(opusKey, opusPath, 'audio/ogg');
+      await db.setOpusFilename(takeId, opusKey);
+      console.log(`[earshot] async transcode done for ${takeId}`);
+    } catch (e) {
+      console.error(`[earshot] async transcode failed for ${takeId}:`, e.message);
+    } finally {
+      try { fs.unlinkSync(wavPath); } catch {}
+      try { fs.unlinkSync(opusPath); } catch {}
+    }
+  })();
+});
+
 // POST /takes — multipart: file=audio, fields: project, durationSec.
 // Optional header X-Earshot-Idempotency: a client-chosen unique string per
 // take. If the same key arrives twice (because the plugin retried after a

@@ -63,6 +63,8 @@ async function buildR2Storage() {
   }
   const { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } =
     await import('@aws-sdk/client-s3');
+  const { Upload } = await import('@aws-sdk/lib-storage');
+  const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
 
   const client = new S3Client({
     region: 'auto',
@@ -107,6 +109,13 @@ async function buildR2Storage() {
         }
       }
       throw lastErr;
+    },
+    // Generate a presigned PUT URL the client can upload directly to.
+    // Avoids routing the upload through our backend (Render Free has a
+    // 100s request timeout that kills big uploads on home bandwidth).
+    async presignPut(key, contentType, expiresSec = 900) {
+      const cmd = new PutObjectCommand({ Bucket, Key: key, ContentType: contentType });
+      return await getSignedUrl(client, cmd, { expiresIn: expiresSec });
     },
     url(key) {
       // Public custom-domain URL. R2 free egress means we can serve direct
