@@ -135,13 +135,17 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
 
   // Push to remote storage when configured. Local backend is a no-op
   // (multer already wrote the WAV; ffmpeg already wrote the Opus).
-  // If storage fails we 5xx so the plugin's Uploader retries — better
-  // than silently saving a DB row that points at a missing object.
+  // We only push the Opus by default — that's all mobile playback ever
+  // needs, and it's ~10x smaller than the WAV, which is the single
+  // biggest factor in upload time. The WAV stays on the laptop's local
+  // disk; set EARSHOT_UPLOAD_WAV=true if/when you wire up a
+  // "download original" feature that needs WAV in R2.
+  const uploadWav = (process.env.EARSHOT_UPLOAD_WAV || 'false').toLowerCase() === 'true';
   try {
     const storage = await getStorage();
     if (storage.kind !== 'local') {
-      await storage.put(req.file.filename, wavPath, 'audio/wav');
       if (opusFilename) await storage.put(opusFilename, opusPath, 'audio/ogg');
+      if (uploadWav)    await storage.put(req.file.filename, wavPath, 'audio/wav');
     }
   } catch (e) {
     console.error('[earshot] storage put failed:', e.message);
@@ -243,29 +247,32 @@ app.get('/takes/:id/audio', async (req, res) => {
 
   const storage = await getStorage();
 
-  // Remote storage (e.g. R2) with public URL: redirect so the client
-  // pulls directly from the CDN and we don't proxy any bytes.
+  // Remote storage with a public URL: only redirect there if the object
+  // actually exists. By default we no longer upload WAVs to R2, so
+  // ?format=wav has to fall through to the local disk copy.
   const remoteUrl = storage.url(filename);
-  if (remoteUrl) return res.redirect(302, remoteUrl);
-
-  // Local storage path.
-  const filePath = path.join(AUDIO_DIR, filename);
-  if (!fs.existsSync(filePath)) {
-    // Opus missing but WAV exists — graceful fallback.
-    if (filename !== row.filename) {
-      const wavFallback = path.join(AUDIO_DIR, row.filename);
-      if (fs.existsSync(wavFallback)) {
-        res.setHeader('Content-Type', 'audio/wav');
-        res.setHeader('Accept-Ranges', 'bytes');
-        return res.sendFile(wavFallback);
-      }
-    }
-    return res.status(404).end();
+  if (remoteUrl && await storage.exists(filename)) {
+    return res.redirect(302, remoteUrl);
   }
 
-  res.setHeader('Content-Type', isOpus ? 'audio/ogg' : 'audio/wav');
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.sendFile(filePath);
+  // Local disk fallback.
+  const filePath = path.join(AUDIO_DIR, filename);
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', isOpus ? 'audio/ogg' : 'audio/wav');
+    res.setHeader('Accept-Ranges', 'bytes');
+    return res.sendFile(filePath);
+  }
+
+  // Last resort: if Opus wasn't found in either place, try the WAV.
+  if (filename !== row.filename) {
+    const wavFallback = path.join(AUDIO_DIR, row.filename);
+    if (fs.existsSync(wavFallback)) {
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Accept-Ranges', 'bytes');
+      return res.sendFile(wavFallback);
+    }
+  }
+  res.status(404).end();
 });
 
 // SPA fallback: anything that wasn't an API route or a static file gets
