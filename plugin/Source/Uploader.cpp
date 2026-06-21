@@ -138,6 +138,14 @@ bool Uploader::postOne (const Job& job)
     // across takes on this machine.
     const auto idemKey = job.file.getFullPathName();
 
+    juce::String extraHeaders;
+    extraHeaders << "X-Earshot-Idempotency: " << idemKey;
+    {
+        const juce::ScopedLock lock (tokenLock);
+        if (authToken.isNotEmpty())
+            extraHeaders << "\r\nAuthorization: Bearer " << authToken;
+    }
+
     juce::StringPairArray responseHeaders;
     int statusCode = 0;
 
@@ -149,7 +157,7 @@ bool Uploader::postOne (const Job& job)
     auto stream = url.createInputStream (
         juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
             .withConnectionTimeoutMs (120000)
-            .withExtraHeaders ("X-Earshot-Idempotency: " + idemKey)
+            .withExtraHeaders (extraHeaders)
             .withResponseHeaders (&responseHeaders)
             .withStatusCode (&statusCode));
 

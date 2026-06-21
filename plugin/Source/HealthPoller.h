@@ -16,6 +16,11 @@ public:
     void stop();
 
     void setBackendBase (const juce::URL& url) { backendBase = url; }
+    void setAuthToken (const juce::String& tok)
+    {
+        const juce::ScopedLock lock (tokenLock);
+        authToken = tok;
+    }
 
     juce::String getPublicUrl() const;
 
@@ -24,10 +29,13 @@ public:
 private:
     void run() override;
 
-    juce::URL backendBase { "http://localhost:8787" };
+    juce::URL backendBase { "https://app.earshot.cc" };
 
     juce::CriticalSection urlLock;
     juce::String publicUrl;
+
+    juce::CriticalSection tokenLock;
+    juce::String authToken;
 
     JUCE_DECLARE_NON_COPYABLE (HealthPoller)
 };

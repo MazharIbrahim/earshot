@@ -94,9 +94,17 @@ void TakesPoller::poll()
     int statusCode = 0;
     juce::StringPairArray headers;
 
+    juce::String extra;
+    {
+        const juce::ScopedLock lock (tokenLock);
+        if (authToken.isNotEmpty())
+            extra << "Authorization: Bearer " << authToken;
+    }
+
     auto stream = url.createInputStream (
         juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
             .withConnectionTimeoutMs (3000)
+            .withExtraHeaders (extra)
             .withResponseHeaders (&headers)
             .withStatusCode (&statusCode));
 
@@ -148,10 +156,18 @@ void TakesPoller::doDelete (const juce::String& id)
     int statusCode = 0;
     juce::StringPairArray headers;
 
+    juce::String extra;
+    {
+        const juce::ScopedLock lock (tokenLock);
+        if (authToken.isNotEmpty())
+            extra << "Authorization: Bearer " << authToken;
+    }
+
     // JUCE's URL has no built-in DELETE verb; use httpRequestCmd to override.
     auto stream = url.createInputStream (
         juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
             .withConnectionTimeoutMs (5000)
+            .withExtraHeaders (extra)
             .withResponseHeaders (&headers)
             .withStatusCode (&statusCode)
             .withHttpRequestCmd ("DELETE"));

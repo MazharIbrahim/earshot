@@ -30,6 +30,12 @@ public:
     void setEndpoint (const juce::URL& url) { endpoint = url; }
     juce::URL getEndpoint() const { return endpoint; }
 
+    void setAuthToken (const juce::String& tok)
+    {
+        const juce::ScopedLock lock (tokenLock);
+        authToken = tok;
+    }
+
     // Called on the message thread when state or queue changes.
     std::function<void()> onStateChanged;
 
@@ -48,7 +54,10 @@ private:
     bool postOne (const Job&);
     void setState (State s, const juce::String& err = {});
 
-    juce::URL endpoint { "http://localhost:8787/takes" };
+    juce::URL endpoint { "https://app.earshot.cc/takes" };
+
+    juce::CriticalSection tokenLock;
+    juce::String authToken;
 
     juce::CriticalSection queueLock;
     std::deque<Job> queue;

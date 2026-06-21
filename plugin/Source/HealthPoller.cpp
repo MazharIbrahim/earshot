@@ -31,9 +31,17 @@ void HealthPoller::run()
         int statusCode = 0;
         juce::StringPairArray headers;
 
+        juce::String extra;
+        {
+            const juce::ScopedLock lock (tokenLock);
+            if (authToken.isNotEmpty())
+                extra << "Authorization: Bearer " << authToken;
+        }
+
         auto stream = url.createInputStream (
             juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
                 .withConnectionTimeoutMs (3000)
+                .withExtraHeaders (extra)
                 .withResponseHeaders (&headers)
                 .withStatusCode (&statusCode));
 

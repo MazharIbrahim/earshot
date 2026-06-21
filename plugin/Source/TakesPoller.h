@@ -26,6 +26,11 @@ public:
 
     void setBackendBase   (const juce::URL& url);
     void setProjectSlug   (const juce::String& slug);
+    void setAuthToken (const juce::String& tok)
+    {
+        const juce::ScopedLock lock (tokenLock);
+        authToken = tok;
+    }
 
     std::vector<CloudTake> getTakes() const;
 
@@ -40,13 +45,16 @@ private:
     void poll();
     void doDelete (const juce::String& id);
 
-    juce::URL backendBase { "http://localhost:8787" };
+    juce::URL backendBase { "https://app.earshot.cc" };
 
     juce::CriticalSection slugLock;
     juce::String projectSlug;
 
     juce::CriticalSection takesLock;
     std::vector<CloudTake> takes;
+
+    juce::CriticalSection tokenLock;
+    juce::String authToken;
 
     // Pending delete requests. Drained by run() so HTTP I/O happens off
     // the message thread.

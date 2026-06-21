@@ -11,6 +11,10 @@ EarshotAudioProcessor::EarshotAudioProcessor()
     {
         uploader.enqueue (rec.file, projectName, rec.durationSec);
     };
+    // Apply defaults to all the background workers before they start.
+    setBackendBase (backendBase);
+    setAuthToken (authToken);
+
     uploader.start();
     healthPoller.start();
     takesPoller.setProjectSlug (juce::String()); // set properly below
@@ -137,18 +141,55 @@ void EarshotAudioProcessor::setProjectName (const juce::String& name)
     takesPoller.setProjectSlug (makeSlug (name));
 }
 
+void EarshotAudioProcessor::setBackendBase (const juce::String& url)
+{
+    backendBase = url.trim();
+    if (backendBase.endsWithChar ('/')) backendBase = backendBase.dropLastCharacters (1);
+    // Propagate to anything that targets the backend.
+    healthPoller.setBackendBase (juce::URL (backendBase));
+    takesPoller.setBackendBase  (juce::URL (backendBase));
+    uploader.setEndpoint        (juce::URL (backendBase + "/takes"));
+}
+
+void EarshotAudioProcessor::setAuthToken (const juce::String& tok)
+{
+    authToken = tok.trim();
+    uploader.setAuthToken     (authToken);
+    healthPoller.setAuthToken (authToken);
+    takesPoller.setAuthToken  (authToken);
+}
+
 void EarshotAudioProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
-    juce::MemoryOutputStream stream (dest, false);
-    stream.writeString (projectName);
+    // Persist as JSON inside the host's saved project. JSON lets us add
+    // fields later without breaking older saved states.
+    juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+    obj->setProperty ("projectName", projectName);
+    obj->setProperty ("backendBase", backendBase);
+    obj->setProperty ("authToken",   authToken);
+    auto json = juce::JSON::toString (juce::var (obj.get()), false);
+    dest.replaceAll (json.toRawUTF8(), json.getNumBytesAsUTF8());
 }
 
 void EarshotAudioProcessor::setStateInformation (const void* data, int size)
 {
+    juce::String json (juce::CharPointer_UTF8 ((const char*) data),
+                       (size_t) juce::jmax (0, size));
+    auto parsed = juce::JSON::parse (json);
+    if (auto* obj = parsed.getDynamicObject())
+    {
+        auto pn = obj->getProperty ("projectName").toString();
+        auto bb = obj->getProperty ("backendBase").toString();
+        auto tk = obj->getProperty ("authToken").toString();
+        if (pn.isNotEmpty()) setProjectName (pn);
+        if (bb.isNotEmpty()) setBackendBase (bb);
+        if (tk.isNotEmpty()) setAuthToken (tk);
+        return;
+    }
+    // Backwards compat: very old saves used MemoryOutputStream::writeString.
     juce::MemoryInputStream stream (data, (size_t) size, false);
     auto name = stream.readString();
-    if (name.isNotEmpty())
-        setProjectName (name);
+    if (name.isNotEmpty()) setProjectName (name);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

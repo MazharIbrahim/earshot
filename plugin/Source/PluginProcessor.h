@@ -44,6 +44,16 @@ public:
 
     bool isCapturing() const { return capturing.load(); }
 
+    // Backend base URL — production by default, override-able from the
+    // settings modal for dev or self-hosting.
+    juce::String getBackendBase() const { return backendBase; }
+    void setBackendBase (const juce::String& url);
+
+    // Long-lived JWT obtained via the device-link flow. Empty when
+    // signed out. Sent as Authorization: Bearer on every API call.
+    juce::String getAuthToken() const { return authToken; }
+    void setAuthToken (const juce::String& tok);
+
     // Arm-and-wait recording: when armed, the audio thread starts a take
     // the next time the host transport plays, and ends it when transport stops.
     void setArmed (bool shouldArm) { armRequested.store (shouldArm); }
@@ -69,6 +79,8 @@ public:
 
 private:
     juce::String projectName { "Untitled" };
+    juce::String backendBase { "https://app.earshot.cc" };
+    juce::String authToken;
     std::atomic<bool> liveActive { false };
     std::atomic<int>  listeners  { 0 };
 
