@@ -10,7 +10,11 @@ services:
     rootDir: backend
     # ffmpeg comes from the ffmpeg-static npm package — bundled prebuilt
     # binary, no apt-get required (Render's non-root runtime can't sudo).
-    buildCommand: npm ci
+    # Build the PWA into ../web/dist so the backend can serve it; this
+    # lets a single Render service host both api + app under one origin.
+    buildCommand: |
+      npm ci
+      cd ../web && npm ci && npm run build
     startCommand: node src/server.js
     healthCheckPath: /healthz
     autoDeploy: true
