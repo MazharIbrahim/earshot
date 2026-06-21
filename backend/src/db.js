@@ -32,6 +32,7 @@ function buildSqlite() {
     'ALTER TABLE takes ADD COLUMN opus_filename TEXT',
     'ALTER TABLE takes ADD COLUMN note TEXT',
     'ALTER TABLE takes ADD COLUMN idempotency_key TEXT',
+    'ALTER TABLE takes ADD COLUMN user_id TEXT',
   ]) { try { db.exec(sql); } catch {} }
   try {
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_takes_idem ON takes (idempotency_key) WHERE idempotency_key IS NOT NULL');
@@ -44,64 +45,75 @@ function buildSqlite() {
     latestCreatedAt: r.latestCreatedAt,
   });
 
+  // userId is opt-in for SQLite: in single-user dev mode we don't track
+  // ownership. Pass it through to keep API parity with the Supabase impl;
+  // SQLite simply ignores it.
   return {
     kind: 'sqlite',
-    insertTake(t) {
+    insertTake(t, _userId) {
       db.prepare(`
         INSERT INTO takes (id, project, project_id, filename, opus_filename,
-                           duration_sec, bytes, created_at, note, idempotency_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           duration_sec, bytes, created_at, note, idempotency_key, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(t.id, t.project, t.projectId, t.filename, t.opusFilename ?? null,
-             t.durationSec, t.bytes, t.createdAt, t.note ?? null, t.idempotencyKey ?? null);
+             t.durationSec, t.bytes, t.createdAt, t.note ?? null,
+             t.idempotencyKey ?? null, _userId ?? null);
       return t;
     },
 
-    findByIdempotency(key) {
+    findByIdempotency(key, userId) {
       if (!key) return null;
       const row = db.prepare(`
         SELECT id, project, project_id AS projectId,
                duration_sec AS durationSec, bytes, created_at AS createdAt,
                opus_filename AS opusFilename
-        FROM takes WHERE idempotency_key = ?
-      `).get(key);
+        FROM takes WHERE idempotency_key = ? AND (user_id = ? OR user_id IS NULL)
+      `).get(key, userId ?? null);
       return row || null;
     },
 
-    listProjects() {
+    listProjects(userId) {
       const rows = db.prepare(`
         SELECT project_id AS projectId, project,
                COUNT(*) AS takes, MAX(created_at) AS latestCreatedAt
-        FROM takes
+        FROM takes WHERE user_id = ? OR user_id IS NULL
         GROUP BY project_id, project
         ORDER BY latestCreatedAt DESC
-      `).all();
+      `).all(userId ?? null);
       return rows.map(projectRowToApi);
     },
 
-    listTakes(projectId) {
+    listTakes(projectId, userId) {
       return db.prepare(`
         SELECT id, project, project_id AS projectId,
                duration_sec AS durationSec, bytes, note,
                created_at AS createdAt
-        FROM takes WHERE project_id = ?
+        FROM takes WHERE project_id = ? AND (user_id = ? OR user_id IS NULL)
         ORDER BY created_at DESC
-      `).all(projectId);
+      `).all(projectId, userId ?? null);
     },
 
+    // No userId on getTakeFiles — used by the audio endpoint which is
+    // intentionally public (share links). Authorization happens in the
+    // handler if we ever need it.
     getTakeFiles(id) {
       const row = db.prepare(
-        'SELECT filename, opus_filename AS opusFilename FROM takes WHERE id = ?'
+        'SELECT filename, opus_filename AS opusFilename, user_id AS userId FROM takes WHERE id = ?'
       ).get(id);
       return row || null;
     },
 
-    updateNote(id, note) {
-      const res = db.prepare('UPDATE takes SET note = ? WHERE id = ?').run(note, id);
+    updateNote(id, note, userId) {
+      const res = db.prepare(
+        'UPDATE takes SET note = ? WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
+      ).run(note, id, userId ?? null);
       return res.changes > 0;
     },
 
-    deleteTake(id) {
-      const res = db.prepare('DELETE FROM takes WHERE id = ?').run(id);
+    deleteTake(id, userId) {
+      const res = db.prepare(
+        'DELETE FROM takes WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
+      ).run(id, userId ?? null);
       return res.changes > 0;
     },
 
@@ -154,7 +166,7 @@ function buildSupabase() {
     note: r.note ?? null,
     createdAt: r.created_at,
   });
-  const toRow = (t) => ({
+  const toRow = (t, userId) => ({
     id: t.id,
     project: t.project,
     project_id: t.projectId,
@@ -165,31 +177,38 @@ function buildSupabase() {
     note: t.note ?? null,
     created_at: t.createdAt,
     idempotency_key: t.idempotencyKey ?? null,
+    user_id: userId ?? null,
   });
+
+  // PostgREST filter for "owned by this user or unowned (pre-auth data)".
+  // Unowned rows exist from before the user_id column was added; this lets
+  // them remain visible to the developer's account until we backfill.
+  const ownerFilter = (userId) =>
+    userId
+      ? `or=(user_id.eq.${encodeURIComponent(userId)},user_id.is.null)`
+      : 'user_id=is.null';
 
   return {
     kind: 'supabase',
-    async insertTake(t) {
+    async insertTake(t, userId) {
       const inserted = await pg('POST', '/takes', {
-        body: toRow(t),
+        body: toRow(t, userId),
         headers: { Prefer: 'return=representation' },
       });
       return inserted?.[0] ? toApi(inserted[0]) : t;
     },
 
-    async findByIdempotency(key) {
+    async findByIdempotency(key, userId) {
       if (!key) return null;
       const rows = await pg('GET',
         `/takes?select=id,project,project_id,filename,opus_filename,duration_sec,bytes,created_at` +
-        `&idempotency_key=eq.${encodeURIComponent(key)}&limit=1`);
+        `&idempotency_key=eq.${encodeURIComponent(key)}&${ownerFilter(userId)}&limit=1`);
       return rows?.[0] ? toApi(rows[0]) : null;
     },
 
-    async listProjects() {
-      // PostgREST has no GROUP BY in the basic API; fetch and aggregate.
-      // Volume is small (hundreds of rows), so this is fine in v1.
+    async listProjects(userId) {
       const rows = await pg('GET',
-        '/takes?select=project_id,project,created_at&order=created_at.desc');
+        `/takes?select=project_id,project,created_at&${ownerFilter(userId)}&order=created_at.desc`);
       const byId = new Map();
       for (const r of rows || []) {
         const existing = byId.get(r.project_id);
@@ -209,30 +228,37 @@ function buildSupabase() {
         .sort((a, b) => b.latestCreatedAt - a.latestCreatedAt);
     },
 
-    async listTakes(projectId) {
+    async listTakes(projectId, userId) {
       const rows = await pg('GET',
         `/takes?select=id,project,project_id,duration_sec,bytes,note,created_at` +
-        `&project_id=eq.${encodeURIComponent(projectId)}&order=created_at.desc`);
+        `&project_id=eq.${encodeURIComponent(projectId)}` +
+        `&${ownerFilter(userId)}&order=created_at.desc`);
       return (rows || []).map(toApi);
     },
 
+    // Audio endpoint stays public for share links — no userId filter here.
+    // The handler decides whether to enforce ownership.
     async getTakeFiles(id) {
       const rows = await pg('GET',
-        `/takes?select=filename,opus_filename&id=eq.${encodeURIComponent(id)}&limit=1`);
+        `/takes?select=filename,opus_filename,user_id&id=eq.${encodeURIComponent(id)}&limit=1`);
       if (!rows?.[0]) return null;
-      return { filename: rows[0].filename, opusFilename: rows[0].opus_filename ?? null };
+      return {
+        filename: rows[0].filename,
+        opusFilename: rows[0].opus_filename ?? null,
+        userId: rows[0].user_id ?? null,
+      };
     },
 
-    async updateNote(id, note) {
+    async updateNote(id, note, userId) {
       const rows = await pg('PATCH',
-        `/takes?id=eq.${encodeURIComponent(id)}`,
+        `/takes?id=eq.${encodeURIComponent(id)}&${ownerFilter(userId)}`,
         { body: { note }, headers: { Prefer: 'return=representation' } });
       return !!(rows && rows.length);
     },
 
-    async deleteTake(id) {
+    async deleteTake(id, userId) {
       const rows = await pg('DELETE',
-        `/takes?id=eq.${encodeURIComponent(id)}`,
+        `/takes?id=eq.${encodeURIComponent(id)}&${ownerFilter(userId)}`,
         { headers: { Prefer: 'return=representation' } });
       return !!(rows && rows.length);
     },

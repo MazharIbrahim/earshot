@@ -11,6 +11,7 @@
 //   data/earshot.db     SQLite (metadata)
 //   data/audio/*.wav    raw take files (uuid named)
 
+import 'express-async-errors';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
@@ -22,6 +23,7 @@ import { startTunnel } from './tunnel.js';
 import { transcodeToOpus } from './transcode.js';
 import { getStorage } from './storage.js';
 import { openDb } from './db.js';
+import { requireAuth, maybeAuth } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -75,13 +77,13 @@ app.get('/healthz', (_req, res) => res.json({
 // dropped response), we treat the second POST as a no-op and return the
 // existing take's metadata. This is the only thing standing between a
 // flaky upload and 47 duplicate rows for one recording.
-app.post('/takes', upload.single('audio'), async (req, res) => {
+app.post('/takes', requireAuth, upload.single('audio'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'audio file required' });
 
   const idemKey = (req.get('x-earshot-idempotency') || '').slice(0, 200) || null;
 
   if (idemKey) {
-    const existing = await db.findByIdempotency(idemKey);
+    const existing = await db.findByIdempotency(idemKey, req.userId);
     if (existing) {
       // Already have it. Throw away the just-uploaded WAV so we don't
       // accumulate orphan files on disk.
@@ -150,7 +152,7 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
     bytes: req.file.size,
     createdAt: now,
     idempotencyKey: idemKey,
-  });
+  }, req.userId);
 
   res.json({
     id, project, projectId,
@@ -161,19 +163,24 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
   });
 });
 
-app.get('/projects', async (_req, res) => {
-  res.json(await db.listProjects());
+app.get('/projects', requireAuth, async (req, res) => {
+  res.json(await db.listProjects(req.userId));
 });
 
-app.get('/projects/:id/takes', async (req, res) => {
-  res.json(await db.listTakes(req.params.id));
+app.get('/projects/:id/takes', requireAuth, async (req, res) => {
+  res.json(await db.listTakes(req.params.id, req.userId));
 });
 
 // DELETE /takes/:id — remove from storage + DB. Idempotent: a 404 is
 // fine if it's already gone.
-app.delete('/takes/:id', async (req, res) => {
+app.delete('/takes/:id', requireAuth, async (req, res) => {
   const files = await db.getTakeFiles(req.params.id);
   if (!files) return res.status(404).end();
+  // Don't let a user delete another user's take just because they know
+  // the URL. Owner check first.
+  if (files.userId && files.userId !== req.userId) {
+    return res.status(403).end();
+  }
 
   const storage = await getStorage();
   for (const name of [files.filename, files.opusFilename].filter(Boolean)) {
@@ -185,16 +192,16 @@ app.delete('/takes/:id', async (req, res) => {
     }
   }
 
-  await db.deleteTake(req.params.id);
+  await db.deleteTake(req.params.id, req.userId);
   res.json({ ok: true });
 });
 
 // PATCH /takes/:id — update editable fields (currently just note).
-app.patch('/takes/:id', async (req, res) => {
+app.patch('/takes/:id', requireAuth, async (req, res) => {
   const note = typeof req.body.note === 'string'
     ? req.body.note.slice(0, 200)
     : null;
-  const ok = await db.updateNote(req.params.id, note);
+  const ok = await db.updateNote(req.params.id, note, req.userId);
   if (!ok) return res.status(404).end();
   res.json({ ok: true });
 });
@@ -247,6 +254,18 @@ app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
   const indexFile = path.join(WEB_DIST, 'index.html');
   if (fs.existsSync(indexFile)) return res.sendFile(indexFile);
   next();
+});
+
+// Catch-all error handler. Without this, an async handler throwing (e.g.
+// a PostgREST 400 because schema is mid-migration) takes down the whole
+// Node process. We want a 500 + logged error instead.
+app.use((err, req, res, _next) => {
+  console.error(`[earshot] ${req.method} ${req.url}:`, err.message);
+  if (!res.headersSent) res.status(500).json({ error: err.message });
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[earshot] unhandledRejection:', reason);
 });
 
 // Prune DB rows whose audio doesn't exist in storage. This happens when
