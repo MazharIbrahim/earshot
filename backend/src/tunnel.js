@@ -9,7 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const PUBLIC_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
+// Quick tunnel hostnames always have at least three hyphen-separated
+// words ("dancing-blue-coast-72.trycloudflare.com"). Restricting to that
+// shape avoids matching cloudflared's own status URLs like
+// "api.trycloudflare.com" that occasionally show up in log output.
+const PUBLIC_URL_RE = /https:\/\/[a-z0-9]+(?:-[a-z0-9]+){2,}\.trycloudflare\.com/i;
 
 function resolveBinary() {
   const candidates = [

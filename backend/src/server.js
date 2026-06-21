@@ -14,7 +14,6 @@
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
-import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -22,33 +21,16 @@ import { fileURLToPath } from 'node:url';
 import { startTunnel } from './tunnel.js';
 import { transcodeToOpus } from './transcode.js';
 import { getStorage } from './storage.js';
+import { openDb } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
 const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 fs.mkdirSync(AUDIO_DIR, { recursive: true });
 
-// ---------- DB ----------
-const db = new Database(path.join(DATA_DIR, 'earshot.db'));
-db.pragma('journal_mode = WAL');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS takes (
-    id           TEXT PRIMARY KEY,
-    project      TEXT NOT NULL,
-    project_id   TEXT NOT NULL,
-    filename     TEXT NOT NULL,
-    duration_sec REAL NOT NULL,
-    bytes        INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_takes_project ON takes (project_id, created_at DESC);
-`);
-
-// Best-effort migrations on existing DBs.
-try { db.exec('ALTER TABLE takes ADD COLUMN opus_filename TEXT'); } catch {}
-try { db.exec('ALTER TABLE takes ADD COLUMN note TEXT'); } catch {}
-try { db.exec('ALTER TABLE takes ADD COLUMN idempotency_key TEXT'); } catch {}
-try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_takes_idem ON takes (idempotency_key) WHERE idempotency_key IS NOT NULL'); } catch {}
+// DB chosen by EARSHOT_DB env (sqlite default, supabase opt-in). Both
+// expose the same camelCase API — see src/db.js.
+const db = await openDb();
 
 const slug = (s) => (s || 'untitled')
   .toLowerCase().trim()
@@ -99,15 +81,22 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
   const idemKey = (req.get('x-earshot-idempotency') || '').slice(0, 200) || null;
 
   if (idemKey) {
-    const existing = db.prepare(
-      'SELECT id, project, project_id AS projectId, duration_sec AS durationSec, bytes, created_at AS createdAt FROM takes WHERE idempotency_key = ?'
-    ).get(idemKey);
+    const existing = await db.findByIdempotency(idemKey);
     if (existing) {
       // Already have it. Throw away the just-uploaded WAV so we don't
       // accumulate orphan files on disk.
       try { fs.unlinkSync(path.join(AUDIO_DIR, req.file.filename)); } catch {}
       console.log(`[earshot] duplicate upload (idempotency=${idemKey}) — returning existing ${existing.id}`);
-      return res.json({ ...existing, opus: true, deduped: true });
+      return res.json({
+        id: existing.id,
+        project: existing.project,
+        projectId: existing.projectId,
+        durationSec: existing.durationSec,
+        bytes: existing.bytes,
+        createdAt: existing.createdAt,
+        opus: !!existing.opusFilename,
+        deduped: true,
+      });
     }
   }
 
@@ -152,82 +141,61 @@ app.post('/takes', upload.single('audio'), async (req, res) => {
     return res.status(502).json({ error: 'storage upload failed', detail: e.message });
   }
 
-  db.prepare(`
-    INSERT INTO takes (id, project, project_id, filename, opus_filename,
-                       duration_sec, bytes, created_at, idempotency_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, project, projectId, req.file.filename, opusFilename,
-         duration, req.file.size, Date.now(), idemKey);
+  const now = Date.now();
+  await db.insertTake({
+    id, project, projectId,
+    filename: req.file.filename,
+    opusFilename,
+    durationSec: duration,
+    bytes: req.file.size,
+    createdAt: now,
+    idempotencyKey: idemKey,
+  });
 
   res.json({
-    id,
-    project,
-    projectId,
+    id, project, projectId,
     durationSec: duration,
     bytes: req.file.size,
     opus: opusFilename != null,
-    createdAt: Date.now(),
+    createdAt: now,
   });
 });
 
-app.get('/projects', (_req, res) => {
-  const rows = db.prepare(`
-    SELECT project_id AS projectId,
-           project,
-           COUNT(*) AS takes,
-           MAX(created_at) AS latestCreatedAt
-    FROM takes
-    GROUP BY project_id, project
-    ORDER BY latestCreatedAt DESC
-  `).all();
-  res.json(rows);
+app.get('/projects', async (_req, res) => {
+  res.json(await db.listProjects());
 });
 
-app.get('/projects/:id/takes', (req, res) => {
-  const rows = db.prepare(`
-    SELECT id, project, project_id AS projectId,
-           duration_sec AS durationSec,
-           bytes,
-           note,
-           created_at AS createdAt
-    FROM takes
-    WHERE project_id = ?
-    ORDER BY created_at DESC
-  `).all(req.params.id);
-  res.json(rows);
+app.get('/projects/:id/takes', async (req, res) => {
+  res.json(await db.listTakes(req.params.id));
 });
 
 // DELETE /takes/:id — remove from storage + DB. Idempotent: a 404 is
 // fine if it's already gone.
 app.delete('/takes/:id', async (req, res) => {
-  const row = db.prepare(
-    'SELECT filename, opus_filename FROM takes WHERE id = ?'
-  ).get(req.params.id);
-  if (!row) return res.status(404).end();
+  const files = await db.getTakeFiles(req.params.id);
+  if (!files) return res.status(404).end();
 
   const storage = await getStorage();
-  for (const name of [row.filename, row.opus_filename].filter(Boolean)) {
+  for (const name of [files.filename, files.opusFilename].filter(Boolean)) {
     try { await storage.remove(name); }
     catch (e) { console.error(`[earshot] delete from storage failed for ${name}:`, e.message); }
-    // Also clean up local copies if any.
     const local = path.join(AUDIO_DIR, name);
     if (fs.existsSync(local)) {
       try { fs.unlinkSync(local); } catch {}
     }
   }
 
-  db.prepare('DELETE FROM takes WHERE id = ?').run(req.params.id);
+  await db.deleteTake(req.params.id);
   res.json({ ok: true });
 });
 
 // PATCH /takes/:id — update editable fields (currently just note).
-app.patch('/takes/:id', (req, res) => {
+app.patch('/takes/:id', async (req, res) => {
   const note = typeof req.body.note === 'string'
     ? req.body.note.slice(0, 200)
     : null;
-  const result = db.prepare('UPDATE takes SET note = ? WHERE id = ?')
-    .run(note, req.params.id);
-  if (result.changes === 0) return res.status(404).end();
+  const ok = await db.updateNote(req.params.id, note);
+  if (!ok) return res.status(404).end();
   res.json({ ok: true });
 });
 
@@ -236,13 +204,11 @@ app.patch('/takes/:id', (req, res) => {
 // ?format=wav: original lossless WAV (for archival download, Pro feature).
 // When remote storage exposes a public URL, redirect there (R2 free egress).
 app.get('/takes/:id/audio', async (req, res) => {
-  const row = db.prepare(
-    'SELECT filename, opus_filename FROM takes WHERE id = ?'
-  ).get(req.params.id);
-  if (!row) return res.status(404).end();
+  const files = await db.getTakeFiles(req.params.id);
+  if (!files) return res.status(404).end();
 
   const wantWav = req.query.format === 'wav';
-  const filename = !wantWav && row.opus_filename ? row.opus_filename : row.filename;
+  const filename = !wantWav && files.opusFilename ? files.opusFilename : files.filename;
   const isOpus = filename.endsWith('.opus');
 
   const storage = await getStorage();
@@ -264,8 +230,8 @@ app.get('/takes/:id/audio', async (req, res) => {
   }
 
   // Last resort: if Opus wasn't found in either place, try the WAV.
-  if (filename !== row.filename) {
-    const wavFallback = path.join(AUDIO_DIR, row.filename);
+  if (filename !== files.filename) {
+    const wavFallback = path.join(AUDIO_DIR, files.filename);
     if (fs.existsSync(wavFallback)) {
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Accept-Ranges', 'bytes');
@@ -288,13 +254,18 @@ app.get(/^\/(?!projects|takes|healthz).*/, (_req, res, next) => {
 async function pruneOrphans() {
   const storage = await getStorage();
   if (storage.kind === 'local') return; // local always-present
-  const rows = db.prepare('SELECT id, filename, opus_filename FROM takes').all();
+  const rows = await db.allTakes();
   let pruned = 0;
   for (const r of rows) {
-    const hasOpus = r.opus_filename ? await storage.exists(r.opus_filename) : false;
+    // Since we stopped uploading WAVs to R2 by default, the existence
+    // check that matters is the Opus. A row counts as good if either is
+    // in storage OR the WAV is still on local disk (the local fallback
+    // path in the audio handler will serve it).
+    const hasOpus = r.opusFilename ? await storage.exists(r.opusFilename) : false;
     const hasWav  = await storage.exists(r.filename);
-    if (hasOpus || hasWav) continue;
-    db.prepare('DELETE FROM takes WHERE id = ?').run(r.id);
+    const localWav = fs.existsSync(path.join(AUDIO_DIR, r.filename));
+    if (hasOpus || hasWav || localWav) continue;
+    await db.deleteTake(r.id);
     pruned++;
   }
   if (pruned > 0) console.log(`[earshot] pruned ${pruned} orphan take row(s)`);
@@ -306,23 +277,21 @@ async function pruneOrphans() {
 async function backfillCloud() {
   const storage = await getStorage();
   if (storage.kind === 'local') return;
-  const rows = db.prepare(
-    'SELECT id, filename, opus_filename FROM takes'
-  ).all();
+  const rows = await db.allTakes();
   let uploaded = 0;
   for (const row of rows) {
-    for (const name of [row.filename, row.opus_filename].filter(Boolean)) {
-      try {
-        const exists = await storage.exists(name);
-        if (exists) continue;
-        const local = path.join(AUDIO_DIR, name);
-        if (!fs.existsSync(local)) continue;
-        const ct = name.endsWith('.opus') ? 'audio/ogg' : 'audio/wav';
-        await storage.put(name, local, ct);
-        uploaded++;
-      } catch (e) {
-        console.error(`[earshot] cloud backfill failed for ${name}:`, e.message);
-      }
+    // Only the Opus is needed in remote storage for playback. WAVs stay
+    // on the local disk; we wouldn't want to silently re-upload a 25 MB
+    // WAV at boot just because it sits next to its Opus.
+    if (!row.opusFilename) continue;
+    try {
+      if (await storage.exists(row.opusFilename)) continue;
+      const local = path.join(AUDIO_DIR, row.opusFilename);
+      if (!fs.existsSync(local)) continue;
+      await storage.put(row.opusFilename, local, 'audio/ogg');
+      uploaded++;
+    } catch (e) {
+      console.error(`[earshot] cloud backfill failed for ${row.opusFilename}:`, e.message);
     }
   }
   if (uploaded > 0) {
@@ -334,9 +303,7 @@ async function backfillCloud() {
 // .opus next to their .wav. Runs sequentially with low priority so we
 // don't fight live uploads.
 async function backfillOpus() {
-  const rows = db.prepare(
-    'SELECT id, filename FROM takes WHERE opus_filename IS NULL'
-  ).all();
+  const rows = (await db.allTakes()).filter(r => !r.opusFilename);
   if (rows.length === 0) return;
   console.log(`[earshot] backfill: ${rows.length} take(s) need transcoding`);
 
@@ -347,8 +314,7 @@ async function backfillOpus() {
     const opusPath = path.join(AUDIO_DIR, opusName);
     try {
       await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
-      db.prepare('UPDATE takes SET opus_filename = ? WHERE id = ?')
-        .run(opusName, row.id);
+      await db.setOpusFilename(row.id, opusName);
       console.log(`[earshot] backfilled ${row.filename}`);
     } catch (e) {
       console.error(`[earshot] backfill failed for ${row.filename}:`, e.message);
