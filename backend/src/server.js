@@ -113,44 +113,14 @@ app.post('/takes', requireAuth, upload.single('audio'), async (req, res) => {
   const opusName = req.file.filename.replace(/\.[^.]+$/, '') + '.opus';
   const opusPath = path.join(AUDIO_DIR, opusName);
 
-  // Transcode synchronously: small files transcode in under a second
-  // and we want the client to know the take is fully ready.
-  let opusFilename = null;
-  try {
-    await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
-    opusFilename = opusName;
-    console.log(`[earshot] transcoded ${req.file.filename} -> ${opusName}`
-      + ` (${(fs.statSync(opusPath).size / 1024).toFixed(1)} KB`
-      + ` vs ${(req.file.size / 1024).toFixed(1)} KB WAV)`);
-  } catch (e) {
-    console.error('[earshot] transcode failed:', e.message);
-    // Continue without Opus — clients fall back to WAV.
-  }
-
-  // Push to remote storage when configured. Local backend is a no-op
-  // (multer already wrote the WAV; ffmpeg already wrote the Opus).
-  // We only push the Opus by default — that's all mobile playback ever
-  // needs, and it's ~10x smaller than the WAV, which is the single
-  // biggest factor in upload time. The WAV stays on the laptop's local
-  // disk; set EARSHOT_UPLOAD_WAV=true if/when you wire up a
-  // "download original" feature that needs WAV in R2.
-  const uploadWav = (process.env.EARSHOT_UPLOAD_WAV || 'false').toLowerCase() === 'true';
-  try {
-    const storage = await getStorage();
-    if (storage.kind !== 'local') {
-      if (opusFilename) await storage.put(opusFilename, opusPath, 'audio/ogg');
-      if (uploadWav)    await storage.put(req.file.filename, wavPath, 'audio/wav');
-    }
-  } catch (e) {
-    console.error('[earshot] storage put failed:', e.message);
-    return res.status(502).json({ error: 'storage upload failed', detail: e.message });
-  }
-
+  // Insert the take row first, *without* opus_filename. Plugin gets
+  // its 200 the moment the WAV is on disk — typical 4-min take goes
+  // from minutes (sync transcode + R2 push) down to ~upload time.
   const now = Date.now();
   await db.insertTake({
     id, project, projectId,
     filename: req.file.filename,
-    opusFilename,
+    opusFilename: null,
     durationSec: duration,
     bytes: req.file.size,
     createdAt: now,
@@ -161,9 +131,36 @@ app.post('/takes', requireAuth, upload.single('audio'), async (req, res) => {
     id, project, projectId,
     durationSec: duration,
     bytes: req.file.size,
-    opus: opusFilename != null,
+    opus: false,           // not yet — finished in background
     createdAt: now,
   });
+
+  // Fire-and-forget: transcode + push to R2 + flip opus_filename.
+  // Until that finishes, the audio endpoint serves the local WAV.
+  const uploadWav = (process.env.EARSHOT_UPLOAD_WAV || 'false').toLowerCase() === 'true';
+  (async () => {
+    try {
+      await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
+      console.log(`[earshot] transcoded ${req.file.filename} -> ${opusName}`
+        + ` (${(fs.statSync(opusPath).size / 1024).toFixed(1)} KB`
+        + ` vs ${(req.file.size / 1024).toFixed(1)} KB WAV)`);
+
+      const storage = await getStorage();
+      if (storage.kind !== 'local') {
+        await storage.put(opusName, opusPath, 'audio/ogg');
+        if (uploadWav) await storage.put(req.file.filename, wavPath, 'audio/wav');
+      }
+      await db.setOpusFilename(id, opusName);
+
+      // Free Render's disk — 750 MB is the free-tier limit. Once Opus
+      // is in R2 we don't need the WAV here anymore (download-original
+      // would re-fetch from R2 if we ever push it there too).
+      try { fs.unlinkSync(wavPath); } catch {}
+      try { fs.unlinkSync(opusPath); } catch {}
+    } catch (e) {
+      console.error(`[earshot] async post-upload failed for ${id}:`, e.message);
+    }
+  })();
 });
 
 app.get('/projects', requireAuth, async (req, res) => {
