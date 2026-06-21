@@ -9,20 +9,31 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 
-function resolveBinary() {
-  const candidates = [
-    'ffmpeg',
-    path.join(os.homedir(), '.local', 'bin', 'ffmpeg'),
-    '/opt/homebrew/bin/ffmpeg',
-    '/usr/local/bin/ffmpeg',
-  ];
-  for (const c of candidates) {
+// Prefer the system ffmpeg if present (faster startup, smaller process
+// memory), but fall back to the bundled binary from `ffmpeg-static` so
+// the backend works on hosts (Render, Fly, etc.) where we can't apt-get.
+const SYSTEM_CANDIDATES = [
+  'ffmpeg',
+  path.join(os.homedir(), '.local', 'bin', 'ffmpeg'),
+  '/opt/homebrew/bin/ffmpeg',
+  '/usr/local/bin/ffmpeg',
+];
+
+async function resolveBinary() {
+  for (const c of SYSTEM_CANDIDATES) {
     if (c.includes('/') && fs.existsSync(c)) return c;
   }
+  // Last resort: the npm-installed prebuilt. Wrapped in try/catch in
+  // case the package failed to download its binary on this platform.
+  try {
+    const ffmpegStatic = (await import('ffmpeg-static')).default;
+    if (ffmpegStatic && fs.existsSync(ffmpegStatic)) return ffmpegStatic;
+  } catch {}
   return 'ffmpeg';
 }
 
-const FFMPEG = resolveBinary();
+const FFMPEG = await resolveBinary();
+console.log(`[earshot] ffmpeg path: ${FFMPEG}`);
 
 export function transcodeToOpus(wavPath, opusPath, { bitrateKbps = 128 } = {}) {
   return new Promise((resolve, reject) => {

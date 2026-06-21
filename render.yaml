@@ -6,16 +6,18 @@ services:
     name: earshot-backend
     runtime: node
     region: oregon         # or 'frankfurt' if your users are EU-heavy
-    plan: starter          # $7/mo, always-on. Switch to 'free' for evaluation.
+    plan: free             # upgrade to 'starter' before launch (no cold starts)
     rootDir: backend
-    buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
-      npm ci
+    # ffmpeg comes from the ffmpeg-static npm package — bundled prebuilt
+    # binary, no apt-get required (Render's non-root runtime can't sudo).
+    buildCommand: npm ci
     startCommand: node src/server.js
     healthCheckPath: /healthz
     autoDeploy: true
 
     envVars:
+      # 20.x LTS — newer Node breaks AWS SDK v3 deprecation warnings into
+      # hard errors and Render's default jumps to 24 unless pinned.
       - key: NODE_VERSION
         value: 20.20.2
       - key: PORT
