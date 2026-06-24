@@ -121,11 +121,12 @@ bool Uploader::postOne (const Job& job)
 
     // Idempotency key — must be stable across retries of the same take.
     // The file's full path contains spaces (~/Library/Application Support/…)
-    // which most servers tolerate but some HTTP middleware mangles. Hash
-    // the path into a clean fixed-length hex string instead.
-    const auto idemKey = juce::SHA256 (job.file.getFullPathName().toUTF8(),
-                                       (size_t) job.file.getFullPathName().getNumBytesAsUTF8())
-                            .toHexString().substring (0, 32);
+    // which most servers tolerate but some HTTP middleware mangles. Use
+    // a simple ASCII-safe encoding (md5 hex via juce::MD5) so the header
+    // value is opaque.
+    const auto idemKey = juce::MD5 (job.file.getFullPathName().toUTF8(),
+                                    (size_t) job.file.getFullPathName().getNumBytesAsUTF8())
+                            .toHexString();
 
     juce::String token;
     { const juce::ScopedLock lock (tokenLock); token = authToken; }
