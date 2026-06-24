@@ -73,6 +73,13 @@ async function buildR2Storage() {
       accessKeyId:     process.env.R2_ACCESS_KEY_ID,
       secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
+    // Don't bake checksum params into presigned URLs. The default
+    // 'WHEN_SUPPORTED' adds x-amz-checksum-crc32 and x-amz-sdk-checksum-
+    // algorithm to the signed URL, which R2 may validate against an
+    // x-amz-checksum-crc32 *header* — fine for curl/JS clients that
+    // compute it, breaks for any client that doesn't.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
   const Bucket = process.env.R2_BUCKET;
   const publicBase = (process.env.R2_PUBLIC_BASE || '').replace(/\/$/, '');
