@@ -119,8 +119,13 @@ bool Uploader::postOne (const Job& job)
         return false;
     }
 
-    // Idempotency key = the file's full path. Stable across retries.
-    const auto idemKey = job.file.getFullPathName();
+    // Idempotency key — must be stable across retries of the same take.
+    // The file's full path contains spaces (~/Library/Application Support/…)
+    // which most servers tolerate but some HTTP middleware mangles. Hash
+    // the path into a clean fixed-length hex string instead.
+    const auto idemKey = juce::SHA256 (job.file.getFullPathName().toUTF8(),
+                                       (size_t) job.file.getFullPathName().getNumBytesAsUTF8())
+                            .toHexString().substring (0, 32);
 
     juce::String token;
     { const juce::ScopedLock lock (tokenLock); token = authToken; }
@@ -204,12 +209,17 @@ bool Uploader::postOne (const Job& job)
     juce::StringPairArray putHeadersOut;
     int putStatus = 0;
 
+    // Critical: ParameterHandling::inAddress keeps the URL's query
+    // parameters in the URL where they belong. The default 'inPostData'
+    // would PREPEND them to the body (juce_URL.cpp::createHeadersAndPostData
+    // calls getMangledParameters when addParametersToBody is true), which
+    // makes R2 see [X-Amz-*=...&WAV bytes] and fail signature validation.
     // withPOSTData(MemoryBlock) sends raw bytes — String would corrupt
     // binary data via UTF-8 validation.
     auto putStream = putUrl
         .withPOSTData (wavBlock)
         .createInputStream (
-            juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+            juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
                 .withConnectionTimeoutMs (300000) // 5 min — R2 doesn't time out
                 .withExtraHeaders ("Content-Type: audio/wav")
                 .withResponseHeaders (&putHeadersOut)
