@@ -45,6 +45,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Light request log so we can see what the plugin is actually sending.
+// Pre-auth so we capture 401s too.
+app.use((req, _res, next) => {
+  if (req.path.startsWith('/takes') || req.path.startsWith('/auth')) {
+    const ip = req.get('cf-connecting-ip') || req.ip;
+    const auth = req.get('authorization') ? 'bearer' : '-';
+    const idem = req.get('x-earshot-idempotency') || '-';
+    console.log(`[req] ${req.method} ${req.path}  ip=${ip}  auth=${auth}  idem=${idem.slice(0,30)}`);
+  }
+  next();
+});
+
 // Serve the built PWA at the root. Backend and frontend share one origin
 // so the PWA can use relative URLs and one Cloudflare tunnel covers both.
 const WEB_DIST = path.join(__dirname, '..', '..', 'web', 'dist');
