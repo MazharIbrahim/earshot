@@ -119,14 +119,19 @@ bool Uploader::postOne (const Job& job)
         return false;
     }
 
-    // Idempotency key — must be stable across retries of the same take.
-    // The file's full path contains spaces (~/Library/Application Support/…)
-    // which most servers tolerate but some HTTP middleware mangles. Use
-    // a simple ASCII-safe encoding (md5 hex via juce::MD5) so the header
-    // value is opaque.
-    const auto idemKey = juce::MD5 (job.file.getFullPathName().toUTF8(),
-                                    (size_t) job.file.getFullPathName().getNumBytesAsUTF8())
-                            .toHexString();
+    // Idempotency key — must be stable across retries of the same take
+    // AND ASCII-safe (some HTTP middleware mangles spaces in headers).
+    // The filename already encodes project + timestamp so it's unique;
+    // strip everything but [A-Za-z0-9._-] and we're good.
+    juce::String idemKey;
+    for (auto c : job.file.getFileName())
+    {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')
+            idemKey += juce::String::charToString (c);
+        else
+            idemKey += '_';
+    }
 
     juce::String token;
     { const juce::ScopedLock lock (tokenLock); token = authToken; }
