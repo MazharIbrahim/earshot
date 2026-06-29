@@ -54,6 +54,7 @@ class QrOverlay : public juce::Component
 public:
     QrOverlay() { setAlwaysOnTop (true); }
     void setUrl (const juce::String& url);
+    juce::String getCurrentUrl() const { return urlText; }
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
 

@@ -188,7 +188,10 @@ app.post('/takes/multipart/init', requireAuth, async (req, res) => {
     const uploadId = await storage.multipartCreate(wavKey, 'audio/wav');
     res.json({
       takeId, wavKey, uploadId,
-      partSize: 8 * 1024 * 1024,
+      // 5 MB chunks: S3 multipart's minimum-per-non-final-part. Smaller
+      // = faster individual PUT completion on slow uplinks = harder for
+      // intermediate idle timeouts to fire mid-chunk.
+      partSize: 5 * 1024 * 1024,
       project, projectId, durationSec: duration,
       idempotencyKey: idemKey,
     });

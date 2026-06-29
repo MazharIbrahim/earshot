@@ -237,75 +237,96 @@ bool Uploader::postOne (const Job& job)
         const juce::int64 offset   = (juce::int64) partIndex * partSize;
         const juce::int64 thisSize = juce::jmin (partSize, totalBytes - offset);
 
-        // 1. ask backend for a signed URL for this part
-        juce::DynamicObject::Ptr signBody = new juce::DynamicObject();
-        signBody->setProperty ("wavKey",     wavKey);
-        signBody->setProperty ("uploadId",   uploadId);
-        signBody->setProperty ("partNumber", partNumber);
-
-        int signStatus = 0;
-        auto signVar = jsonPost (signUrl,
-                                 juce::JSON::toString (juce::var (signBody.get()), false),
-                                 token, {}, &signStatus);
-        if (signStatus < 200 || signStatus >= 300)
+        // Retry the chunk up to 3 times to absorb transient network blips
+        // (TLS reset, brief idle timeout, intermediate proxy hiccup).
+        for (int attempt = 1; attempt <= 3; ++attempt)
         {
-            anyFailed.store (true);
-            juce::Logger::writeToLog ("[Earshot] sign-part " + juce::String (partNumber)
-                                       + " failed status=" + juce::String (signStatus));
-            return;
+            if (anyFailed.load() || threadShouldExit()) return;
+
+            // 1. signed URL
+            juce::DynamicObject::Ptr signBody = new juce::DynamicObject();
+            signBody->setProperty ("wavKey",     wavKey);
+            signBody->setProperty ("uploadId",   uploadId);
+            signBody->setProperty ("partNumber", partNumber);
+
+            int signStatus = 0;
+            auto signVar = jsonPost (signUrl,
+                                     juce::JSON::toString (juce::var (signBody.get()), false),
+                                     token, {}, &signStatus);
+            if (signStatus < 200 || signStatus >= 300)
+            {
+                juce::Logger::writeToLog ("[Earshot] sign-part " + juce::String (partNumber)
+                                           + " attempt " + juce::String (attempt)
+                                           + " failed status=" + juce::String (signStatus));
+                if (attempt == 3) { anyFailed.store (true); return; }
+                continue;
+            }
+            auto* signObj = signVar.getDynamicObject();
+            const auto partUrl = signObj ? signObj->getProperty ("url").toString() : juce::String();
+            if (partUrl.isEmpty())
+            {
+                if (attempt == 3) { anyFailed.store (true); return; }
+                continue;
+            }
+
+            // 2. PUT chunk
+            juce::MemoryBlock chunk (static_cast<const char*> (wavBlock.getData()) + offset, (size_t) thisSize);
+            juce::URL partPutUrl (partUrl);
+            juce::StringPairArray respHeaders;
+            int putStatus = 0;
+            auto putStream = partPutUrl
+                .withPOSTData (chunk)
+                .createInputStream (
+                    juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                        // 5 min per part is generous — at 5 MB and 50 KB/s
+                        // (very slow uplink), one part still finishes in
+                        // ~100 s. At 250 KB/s, ~20 s.
+                        .withConnectionTimeoutMs (300000)
+                        .withResponseHeaders (&respHeaders)
+                        .withStatusCode (&putStatus)
+                        .withHttpRequestCmd ("PUT"));
+
+            if (putStream == nullptr || putStatus < 200 || putStatus >= 300)
+            {
+                juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
+                                           + " attempt " + juce::String (attempt)
+                                           + " PUT failed status=" + juce::String (putStatus));
+                if (attempt == 3) { anyFailed.store (true); return; }
+                continue;
+            }
+            putStream->readEntireStreamAsString();
+
+            auto etag = respHeaders.getValue ("ETag", respHeaders.getValue ("etag", "")).unquoted();
+            if (etag.isEmpty())
+            {
+                if (attempt == 3) { anyFailed.store (true); return; }
+                continue;
+            }
+
+            juce::DynamicObject::Ptr pe = new juce::DynamicObject();
+            pe->setProperty ("partNumber", partNumber);
+            pe->setProperty ("etag",       etag);
+            {
+                const juce::ScopedLock lock (partsListLock);
+                partsForComplete.set (partIndex, juce::var (pe.get()));
+            }
+            partDone[(size_t) partIndex].store (thisSize);
+
+            juce::int64 sum = 0;
+            for (auto& a : partDone) sum += a.load();
+            currentJobUploadedBytes.store (sum);
+            progress.store ((float) sum / (float) totalBytes);
+            if (onStateChanged)
+                juce::MessageManager::callAsync ([cb = onStateChanged] { if (cb) cb(); });
+            return; // success
         }
-        auto* signObj = signVar.getDynamicObject();
-        const auto partUrl = signObj ? signObj->getProperty ("url").toString() : juce::String();
-        if (partUrl.isEmpty()) { anyFailed.store (true); return; }
-
-        // 2. PUT the chunk
-        juce::MemoryBlock chunk (static_cast<const char*> (wavBlock.getData()) + offset, (size_t) thisSize);
-        juce::URL partPutUrl (partUrl);
-        juce::StringPairArray respHeaders;
-        int putStatus = 0;
-        auto putStream = partPutUrl
-            .withPOSTData (chunk)
-            .createInputStream (
-                juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                    .withConnectionTimeoutMs (120000)
-                    .withResponseHeaders (&respHeaders)
-                    .withStatusCode (&putStatus)
-                    .withHttpRequestCmd ("PUT"));
-
-        if (putStream == nullptr || putStatus < 200 || putStatus >= 300)
-        {
-            anyFailed.store (true);
-            juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
-                                       + " PUT failed status=" + juce::String (putStatus));
-            return;
-        }
-        putStream->readEntireStreamAsString();
-
-        auto etag = respHeaders.getValue ("ETag", respHeaders.getValue ("etag", "")).unquoted();
-        if (etag.isEmpty()) { anyFailed.store (true); return; }
-
-        juce::DynamicObject::Ptr pe = new juce::DynamicObject();
-        pe->setProperty ("partNumber", partNumber);
-        pe->setProperty ("etag",       etag);
-        {
-            const juce::ScopedLock lock (partsListLock);
-            partsForComplete.set (partIndex, juce::var (pe.get()));
-        }
-        partDone[(size_t) partIndex].store (thisSize);
-
-        // Aggregate progress across all workers.
-        juce::int64 sum = 0;
-        for (auto& a : partDone) sum += a.load();
-        currentJobUploadedBytes.store (sum);
-        progress.store ((float) sum / (float) totalBytes);
-        if (onStateChanged)
-            juce::MessageManager::callAsync ([cb = onStateChanged] { if (cb) cb(); });
     };
 
-    // Worker pool: up to 4 concurrent PUTs. Net effect on home uplinks is
-    // limited by total bandwidth, but R2 / TLS / NAT idle quirks no longer
-    // serialize behind one slow chunk.
-    constexpr int kMaxConcurrent = 4;
+    // Worker pool: 2 concurrent PUTs. 4 parallel was eating bandwidth on
+    // slow uplinks (each chunk crawled past the per-chunk timeout). 2
+    // is the sweet spot — enough parallelism to mask one chunk's
+    // network blip without splintering the uplink.
+    constexpr int kMaxConcurrent = 2;
     std::vector<std::thread> workers;
     std::atomic<int> nextPart { 0 };
     for (int w = 0; w < juce::jmin (kMaxConcurrent, numParts); ++w)

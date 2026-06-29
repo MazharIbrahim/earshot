@@ -431,13 +431,22 @@ void EarshotAudioProcessorEditor::timerCallback()
     refreshUploadStatus(); // keep the per-MB progress moving
 
     // While the sign-in flow is mid-poll, keep the QR overlay showing
-    // the device-link URL. The poller fires onLinked when paired, which
-    // hides the overlay.
+    // the device-link URL — UNLESS the user already dismissed the
+    // overlay (in which case we cancel the flow instead of re-opening).
     if (signInFlow.isThreadRunning() && processorRef.getAuthToken().isEmpty())
     {
-        auto url = signInFlow.getRedeemUrl();
-        if (url.isNotEmpty() && ! qrOverlay.isVisible())
-            showQrFor (url);
+        if (qrOverlay.isVisible())
+        {
+            // Overlay is up: keep the URL in sync (in case poll just got it).
+            auto url = signInFlow.getRedeemUrl();
+            if (url.isNotEmpty() && qrOverlay.getCurrentUrl() != url)
+                showQrFor (url);
+        }
+        else
+        {
+            // User dismissed it — abort the sign-in attempt cleanly.
+            signInFlow.cancel();
+        }
     }
 
     // Keep the "open on phone" button label in sync with auth state.
