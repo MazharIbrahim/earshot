@@ -142,6 +142,149 @@ app.post('/takes/upload-url', requireAuth, async (req, res) => {
   }
 });
 
+// --- Multipart upload (big files) -------------------------------------
+//
+// For takes whose WAV is bigger than ~10 MB, a single PUT to R2 over a
+// slow uplink either hangs in the OS socket layer or hits some
+// intermediate idle timeout. Multipart upload splits the WAV into 8 MB
+// parts; each part is its own PUT with its own presigned URL. Plugin
+// can show real progress and retry individual parts.
+//
+//   1. POST /takes/multipart/init     → { takeId, wavKey, uploadId, partSize }
+//   2. POST /takes/multipart/sign-part → { url } for partNumber=N
+//   3. plugin uploads each part to its signed URL, collects ETags
+//   4. POST /takes/multipart/complete  with { uploadId, parts, ... }
+
+app.post('/takes/multipart/init', requireAuth, async (req, res) => {
+  const project = (req.body?.project || 'Untitled').toString().slice(0, 200);
+  const projectId = slug(project);
+  const duration = Number(req.body?.durationSec) || 0;
+  const idemKey = (req.get('x-earshot-idempotency') || '').slice(0, 200) || null;
+
+  if (idemKey) {
+    const existing = await db.findByIdempotency(idemKey, req.userId);
+    if (existing) {
+      return res.json({
+        deduped: true,
+        takeId: existing.id, project: existing.project,
+        projectId: existing.projectId, durationSec: existing.durationSec,
+      });
+    }
+  }
+
+  const takeId = nanoid();
+  const wavKey = `${takeId}.wav`;
+  const storage = await getStorage();
+  if (!storage.multipartCreate) {
+    return res.status(501).json({ error: 'multipart not supported by storage backend' });
+  }
+  try {
+    const uploadId = await storage.multipartCreate(wavKey, 'audio/wav');
+    res.json({
+      takeId, wavKey, uploadId,
+      partSize: 8 * 1024 * 1024,
+      project, projectId, durationSec: duration,
+      idempotencyKey: idemKey,
+    });
+  } catch (e) {
+    console.error('[earshot] multipart init failed:', e.message);
+    res.status(500).json({ error: 'multipart init failed' });
+  }
+});
+
+app.post('/takes/multipart/sign-part', requireAuth, async (req, res) => {
+  const { wavKey, uploadId, partNumber } = req.body || {};
+  if (!wavKey || !uploadId || !Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10000) {
+    return res.status(400).json({ error: 'bad part request' });
+  }
+  const storage = await getStorage();
+  try {
+    const url = await storage.presignPart(wavKey, uploadId, partNumber);
+    res.json({ url });
+  } catch (e) {
+    console.error('[earshot] sign-part failed:', e.message);
+    res.status(500).json({ error: 'sign failed' });
+  }
+});
+
+app.post('/takes/multipart/complete', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const takeId  = String(b.takeId || '');
+  const wavKey  = String(b.wavKey || '');
+  const uploadId = String(b.uploadId || '');
+  const parts   = Array.isArray(b.parts) ? b.parts : null;
+  const project = (b.project || 'Untitled').toString().slice(0, 200);
+  const projectId = slug(project);
+  const duration = Number(b.durationSec) || 0;
+  const bytes = Number(b.bytes) || 0;
+  const idemKey = (b.idempotencyKey || null) || null;
+
+  if (!takeId || !wavKey || !uploadId || !parts || !parts.length) {
+    return res.status(400).json({ error: 'missing fields' });
+  }
+
+  const storage = await getStorage();
+  try {
+    await storage.multipartComplete(wavKey, uploadId, parts.map(p => ({
+      PartNumber: p.partNumber, ETag: p.etag,
+    })));
+  } catch (e) {
+    console.error('[earshot] multipart complete failed:', e.message);
+    return res.status(502).json({ error: 'storage complete failed', detail: e.message });
+  }
+
+  const now = Date.now();
+  try {
+    await db.insertTake({
+      id: takeId, project, projectId,
+      filename: wavKey, opusFilename: null,
+      durationSec: duration, bytes,
+      createdAt: now, idempotencyKey: idemKey,
+    }, req.userId);
+  } catch (e) {
+    if (/duplicate|unique|constraint/i.test(e.message)) {
+      return res.json({ takeId, deduped: true });
+    }
+    throw e;
+  }
+
+  res.json({
+    id: takeId, project, projectId,
+    durationSec: duration, bytes,
+    opus: false, createdAt: now,
+  });
+
+  // Same async transcode hand-off as the single-PUT flow.
+  const wavPath = path.join(AUDIO_DIR, wavKey);
+  const opusKey = wavKey.replace(/\.[^.]+$/, '') + '.opus';
+  const opusPath = path.join(AUDIO_DIR, opusKey);
+  (async () => {
+    try {
+      const r = await fetch(storage.url(wavKey));
+      if (!r.ok) throw new Error(`download ${wavKey} → ${r.status}`);
+      await fs.promises.writeFile(wavPath, Buffer.from(await r.arrayBuffer()));
+      await transcodeToOpus(wavPath, opusPath, { bitrateKbps: 128 });
+      await storage.put(opusKey, opusPath, 'audio/ogg');
+      await db.setOpusFilename(takeId, opusKey);
+      console.log(`[earshot] async transcode done for ${takeId}`);
+    } catch (e) {
+      console.error(`[earshot] async transcode failed for ${takeId}:`, e.message);
+    } finally {
+      try { fs.unlinkSync(wavPath); } catch {}
+      try { fs.unlinkSync(opusPath); } catch {}
+    }
+  })();
+});
+
+// Abort endpoint for cleanup if plugin crashes mid-upload.
+app.post('/takes/multipart/abort', requireAuth, async (req, res) => {
+  const { wavKey, uploadId } = req.body || {};
+  if (!wavKey || !uploadId) return res.status(400).end();
+  const storage = await getStorage();
+  await storage.multipartAbort(wavKey, uploadId);
+  res.json({ ok: true });
+});
+
 app.post('/takes/upload-complete', requireAuth, async (req, res) => {
   const body = req.body || {};
   const takeId = String(body.takeId || '');

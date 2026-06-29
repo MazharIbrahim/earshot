@@ -102,12 +102,36 @@ void Uploader::run()
     }
 }
 
-// Direct-to-R2 upload flow. Three steps:
-//   1. POST <backend>/takes/upload-url → { takeId, wavKey, uploadUrl }
-//   2. PUT  the WAV bytes to uploadUrl (Cloudflare R2, no Render in the path)
-//   3. POST <backend>/takes/upload-complete with the takeId
-// Render only sees two tiny JSON requests. The big bytes go to R2 directly,
-// which avoids Render Free's 100s request-timeout on large WAV uploads.
+// Helper: small JSON POST with auth + idempotency. Returns parsed body.
+static juce::var jsonPost (const juce::URL& url,
+                           const juce::String& body,
+                           const juce::String& token,
+                           const juce::String& idemHeader,
+                           int* statusOut = nullptr,
+                           int timeoutMs = 30000)
+{
+    juce::String hdr;
+    hdr << "Content-Type: application/json\r\n"
+        << "Authorization: Bearer " << token;
+    if (idemHeader.isNotEmpty()) hdr << "\r\nX-Earshot-Idempotency: " << idemHeader;
+
+    juce::StringPairArray respHeaders;
+    int status = 0;
+    auto stream = url.withPOSTData (body).createInputStream (
+        juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+            .withConnectionTimeoutMs (timeoutMs)
+            .withExtraHeaders (hdr)
+            .withResponseHeaders (&respHeaders)
+            .withStatusCode (&status));
+    if (statusOut != nullptr) *statusOut = status;
+    if (stream == nullptr) return {};
+    return juce::JSON::parse (stream->readEntireStreamAsString());
+}
+
+// Direct-to-R2 multipart upload. Splits the WAV into 8 MB chunks; each
+// chunk is its own presigned PUT. Single-PUT was hanging on bigger files
+// over slow uplinks (NSURLSession + buffered 46 MB body + intermediate
+// idle timeouts). Multipart fixes that AND gives us real progress.
 bool Uploader::postOne (const Job& job)
 {
     if (! job.file.existsAsFile())
@@ -141,147 +165,163 @@ bool Uploader::postOne (const Job& job)
         return false;
     }
 
-    // ---------- Step 1: ask backend for a presigned URL ----------
-    // endpoint = backendBase + "/takes". Append "/upload-url" and
-    // "/upload-complete" rather than reaching into URL internals.
+    // Reset per-job progress counters.
+    progress.store (0.0f);
+    currentJobTotalBytes.store ((juce::int64) job.file.getSize());
+    currentJobUploadedBytes.store (0);
+
+    // endpoint = backendBase + "/takes". Build multipart subpaths.
     const auto base = endpoint.toString (false);
-    juce::URL beginUrl    (base + "/upload-url");
-    juce::URL completeUrl (base + "/upload-complete");
+    const juce::URL initUrl     (base + "/multipart/init");
+    const juce::URL signUrl     (base + "/multipart/sign-part");
+    const juce::URL completeUrl (base + "/multipart/complete");
+    const juce::URL abortUrl    (base + "/multipart/abort");
 
-    // Build a small JSON body via DynamicObject so escaping is correct.
-    juce::DynamicObject::Ptr bodyObj = new juce::DynamicObject();
-    bodyObj->setProperty ("project",     job.project);
-    bodyObj->setProperty ("durationSec", job.durationSec);
-    const auto bodyJson = juce::JSON::toString (juce::var (bodyObj.get()), false);
+    // ---------- Step 1: multipart init ----------
+    juce::DynamicObject::Ptr initBody = new juce::DynamicObject();
+    initBody->setProperty ("project",     job.project);
+    initBody->setProperty ("durationSec", job.durationSec);
 
-    juce::String beginHeaders;
-    beginHeaders << "Content-Type: application/json\r\n"
-                 << "Authorization: Bearer " << token << "\r\n"
-                 << "X-Earshot-Idempotency: " << idemKey;
-
-    juce::StringPairArray beginHeadersOut;
-    int beginStatus = 0;
-    auto beginStream = beginUrl
-        .withPOSTData (bodyJson)
-        .createInputStream (
-            juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
-                .withConnectionTimeoutMs (30000)
-                .withExtraHeaders (beginHeaders)
-                .withResponseHeaders (&beginHeadersOut)
-                .withStatusCode (&beginStatus));
-
-    if (beginStream == nullptr || beginStatus < 200 || beginStatus >= 300)
+    int initStatus = 0;
+    auto initVar = jsonPost (initUrl,
+                             juce::JSON::toString (juce::var (initBody.get()), false),
+                             token, idemKey, &initStatus);
+    if (initStatus < 200 || initStatus >= 300)
     {
-        setState (State::Failed,
-                  "begin failed (" + juce::String (beginStatus) + ")");
-        juce::Logger::writeToLog ("[Earshot] upload-url failed status="
-                                   + juce::String (beginStatus));
+        setState (State::Failed, "init " + juce::String (initStatus));
+        juce::Logger::writeToLog ("[Earshot] multipart init failed status=" + juce::String (initStatus));
         return false;
     }
-    auto beginBody = beginStream->readEntireStreamAsString();
-    auto beginVar  = juce::JSON::parse (beginBody);
-    auto* beginObj = beginVar.getDynamicObject();
-    if (! beginObj)
-    {
-        setState (State::Failed, "begin: bad json");
-        return false;
-    }
-    const auto takeId    = beginObj->getProperty ("takeId").toString();
-    const auto wavKey    = beginObj->getProperty ("wavKey").toString();
-    const auto uploadUrl = beginObj->getProperty ("uploadUrl").toString();
-    const auto deduped   = bool (beginObj->getProperty ("deduped"));
+    auto* initObj = initVar.getDynamicObject();
+    if (! initObj) { setState (State::Failed, "init: bad json"); return false; }
 
-    if (deduped)
+    const auto takeId   = initObj->getProperty ("takeId").toString();
+    const auto wavKey   = initObj->getProperty ("wavKey").toString();
+    const auto uploadId = initObj->getProperty ("uploadId").toString();
+    const auto partSize = (juce::int64) (int) initObj->getProperty ("partSize");
+    const bool deduped  = bool (initObj->getProperty ("deduped"));
+    if (deduped) { juce::Logger::writeToLog ("[Earshot] dedup hit"); return true; }
+    if (takeId.isEmpty() || uploadId.isEmpty() || partSize <= 0)
     {
-        // Server already has this take. Done.
-        juce::Logger::writeToLog ("[Earshot] dedup hit, takeId=" + takeId);
-        return true;
-    }
-    if (takeId.isEmpty() || uploadUrl.isEmpty())
-    {
-        setState (State::Failed, "begin: missing fields");
+        setState (State::Failed, "init: missing fields");
         return false;
     }
 
-    // ---------- Step 2: PUT bytes to R2 directly ----------
+    // ---------- Step 2: read file + upload each part ----------
     juce::MemoryBlock wavBlock;
     if (! job.file.loadFileAsData (wavBlock))
     {
         setState (State::Failed, "read file failed");
         return false;
     }
+    const juce::int64 totalBytes = (juce::int64) wavBlock.getSize();
+    currentJobTotalBytes.store (totalBytes);
 
-    juce::URL putUrl (uploadUrl);
-    juce::StringPairArray putHeadersOut;
-    int putStatus = 0;
-
-    // Critical: ParameterHandling::inAddress keeps the URL's query
-    // parameters in the URL where they belong. The default 'inPostData'
-    // would PREPEND them to the body (juce_URL.cpp::createHeadersAndPostData
-    // calls getMangledParameters when addParametersToBody is true), which
-    // makes R2 see [X-Amz-*=...&WAV bytes] and fail signature validation.
-    // withPOSTData(MemoryBlock) sends raw bytes — String would corrupt
-    // binary data via UTF-8 validation.
-    auto putStream = putUrl
-        .withPOSTData (wavBlock)
-        .createInputStream (
-            juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                .withConnectionTimeoutMs (300000) // 5 min — R2 doesn't time out
-                .withExtraHeaders ("Content-Type: audio/wav")
-                .withResponseHeaders (&putHeadersOut)
-                .withStatusCode (&putStatus)
-                .withHttpRequestCmd ("PUT"));
-
-    if (putStream == nullptr) {
-        setState (State::Failed, "r2 put: no stream");
-        return false;
-    }
-    putStream->readEntireStreamAsString(); // drain
-
-    if (putStatus < 200 || putStatus >= 300)
+    juce::Array<juce::var> partsForComplete;
+    juce::int64 offset = 0;
+    int partNumber = 0;
+    while (offset < totalBytes)
     {
-        setState (State::Failed, "r2 put failed (" + juce::String (putStatus) + ")");
-        juce::Logger::writeToLog ("[Earshot] r2 PUT failed status=" + juce::String (putStatus));
-        return false;
+        if (threadShouldExit()) return false;
+        ++partNumber;
+        const juce::int64 thisSize = juce::jmin (partSize, totalBytes - offset);
+
+        // Get a signed URL for this part.
+        juce::DynamicObject::Ptr signBody = new juce::DynamicObject();
+        signBody->setProperty ("wavKey",     wavKey);
+        signBody->setProperty ("uploadId",   uploadId);
+        signBody->setProperty ("partNumber", partNumber);
+
+        int signStatus = 0;
+        auto signVar = jsonPost (signUrl,
+                                 juce::JSON::toString (juce::var (signBody.get()), false),
+                                 token, {}, &signStatus);
+        if (signStatus < 200 || signStatus >= 300)
+        {
+            setState (State::Failed, "sign " + juce::String (signStatus));
+            juce::Logger::writeToLog ("[Earshot] sign-part " + juce::String (partNumber)
+                                       + " failed status=" + juce::String (signStatus));
+            return false;
+        }
+        auto* signObj = signVar.getDynamicObject();
+        const auto partUrl = signObj ? signObj->getProperty ("url").toString() : juce::String();
+        if (partUrl.isEmpty()) { setState (State::Failed, "sign: no url"); return false; }
+
+        // PUT the chunk.
+        juce::MemoryBlock chunk (static_cast<const char*> (wavBlock.getData()) + offset, (size_t) thisSize);
+        juce::URL partPutUrl (partUrl);
+        juce::StringPairArray respHeaders;
+        int putStatus = 0;
+        auto putStream = partPutUrl
+            .withPOSTData (chunk)
+            .createInputStream (
+                juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                    .withConnectionTimeoutMs (120000) // 2 min per 8 MB part
+                    .withResponseHeaders (&respHeaders)
+                    .withStatusCode (&putStatus)
+                    .withHttpRequestCmd ("PUT"));
+
+        if (putStream == nullptr || putStatus < 200 || putStatus >= 300)
+        {
+            setState (State::Failed, "part " + juce::String (partNumber)
+                       + " failed (" + juce::String (putStatus) + ")");
+            juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
+                                       + " PUT failed status=" + juce::String (putStatus));
+            return false;
+        }
+        putStream->readEntireStreamAsString(); // drain
+
+        // ETag from R2's response — strip quotes that S3-compatible APIs wrap it in.
+        auto etag = respHeaders.getValue ("ETag", respHeaders.getValue ("etag", ""));
+        etag = etag.unquoted();
+        if (etag.isEmpty())
+        {
+            setState (State::Failed, "part " + juce::String (partNumber) + ": no etag");
+            return false;
+        }
+
+        juce::DynamicObject::Ptr pe = new juce::DynamicObject();
+        pe->setProperty ("partNumber", partNumber);
+        pe->setProperty ("etag",       etag);
+        partsForComplete.add (juce::var (pe.get()));
+
+        offset += thisSize;
+        currentJobUploadedBytes.store (offset);
+        progress.store ((float) offset / (float) totalBytes);
+        // Notify UI of progress.
+        if (onStateChanged)
+            juce::MessageManager::callAsync ([cb = onStateChanged] { if (cb) cb(); });
+
+        juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
+                                   + "/" + juce::String ((totalBytes + partSize - 1) / partSize)
+                                   + " ok (" + juce::String (offset / 1024) + " KB)");
     }
 
-    // ---------- Step 3: tell backend the upload finished ----------
-    juce::DynamicObject::Ptr completeObj = new juce::DynamicObject();
-    completeObj->setProperty ("takeId",          takeId);
-    completeObj->setProperty ("wavKey",          wavKey);
-    completeObj->setProperty ("project",         job.project);
-    completeObj->setProperty ("durationSec",     job.durationSec);
-    completeObj->setProperty ("bytes",           (juce::int64) wavBlock.getSize());
-    completeObj->setProperty ("idempotencyKey",  idemKey);
-    const auto completeBody = juce::JSON::toString (juce::var (completeObj.get()), false);
+    // ---------- Step 3: complete the multipart upload ----------
+    juce::DynamicObject::Ptr completeBody = new juce::DynamicObject();
+    completeBody->setProperty ("takeId",         takeId);
+    completeBody->setProperty ("wavKey",         wavKey);
+    completeBody->setProperty ("uploadId",       uploadId);
+    completeBody->setProperty ("parts",          partsForComplete);
+    completeBody->setProperty ("project",        job.project);
+    completeBody->setProperty ("durationSec",    job.durationSec);
+    completeBody->setProperty ("bytes",          totalBytes);
+    completeBody->setProperty ("idempotencyKey", idemKey);
 
-    juce::String completeHeaders;
-    completeHeaders << "Content-Type: application/json\r\n"
-                    << "Authorization: Bearer " << token;
-
-    juce::StringPairArray completeHeadersOut;
     int completeStatus = 0;
-    auto completeStream = completeUrl
-        .withPOSTData (completeBody)
-        .createInputStream (
-            juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
-                .withConnectionTimeoutMs (30000)
-                .withExtraHeaders (completeHeaders)
-                .withResponseHeaders (&completeHeadersOut)
-                .withStatusCode (&completeStatus));
-
-    if (completeStream == nullptr || completeStatus < 200 || completeStatus >= 300)
+    auto completeVar = jsonPost (completeUrl,
+                                 juce::JSON::toString (juce::var (completeBody.get()), false),
+                                 token, {}, &completeStatus, 60000);
+    if (completeStatus < 200 || completeStatus >= 300)
     {
-        setState (State::Failed,
-                  "complete failed (" + juce::String (completeStatus) + ")");
-        juce::Logger::writeToLog ("[Earshot] upload-complete failed status="
+        setState (State::Failed, "complete " + juce::String (completeStatus));
+        juce::Logger::writeToLog ("[Earshot] multipart complete failed status="
                                    + juce::String (completeStatus));
-        // R2 has the bytes; another retry will hit the idempotency-key
-        // dedup and return success without re-uploading.
         return false;
     }
 
-    completeStream->readEntireStreamAsString();
-    juce::Logger::writeToLog ("[Earshot] uploaded ok takeId=" + takeId);
+    juce::Logger::writeToLog ("[Earshot] uploaded ok takeId=" + takeId
+                               + " parts=" + juce::String (partNumber));
+    progress.store (1.0f);
     return true;
 }

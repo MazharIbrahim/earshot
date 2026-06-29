@@ -27,6 +27,11 @@ public:
     juce::String getLastError() const;
     int          getQueueDepth() const;
 
+    // Progress on the current job (0..1) and bytes for status display.
+    float        getProgress() const { return progress.load(); }
+    juce::int64  getCurrentJobTotalBytes() const { return currentJobTotalBytes.load(); }
+    juce::int64  getCurrentJobUploadedBytes() const { return currentJobUploadedBytes.load(); }
+
     void setEndpoint (const juce::URL& url) { endpoint = url; }
     juce::URL getEndpoint() const { return endpoint; }
 
@@ -58,6 +63,10 @@ private:
 
     juce::CriticalSection tokenLock;
     juce::String authToken;
+
+    std::atomic<float>       progress { 0.0f };
+    std::atomic<juce::int64> currentJobTotalBytes    { 0 };
+    std::atomic<juce::int64> currentJobUploadedBytes { 0 };
 
     juce::CriticalSection queueLock;
     std::deque<Job> queue;

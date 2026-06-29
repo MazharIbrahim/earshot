@@ -394,6 +394,7 @@ void EarshotAudioProcessorEditor::timerCallback()
 {
     meter.setLevels (processorRef.getPeakL(), processorRef.getPeakR());
     updateRecButton();
+    refreshUploadStatus(); // keep the per-MB progress moving
 
     // While the sign-in flow is mid-poll, keep the QR overlay showing
     // the device-link URL. The poller fires onLinked when paired, which
@@ -485,10 +486,27 @@ void EarshotAudioProcessorEditor::refreshUploadStatus()
                 : juce::String::fromUTF8 (" · synced");
             break;
         case Uploader::State::Uploading:
-            suffix = juce::String::fromUTF8 ("  uploading…");
-            if (queued > 1) suffix << " (" << queued << ")";
+        {
+            // Show real progress in MB so user can see slow uploads moving.
+            const auto total = u.getCurrentJobTotalBytes();
+            const auto done  = u.getCurrentJobUploadedBytes();
+            if (total > 0)
+            {
+                const float doneMB  = (float) done  / (1024.0f * 1024.0f);
+                const float totalMB = (float) total / (1024.0f * 1024.0f);
+                const int   pct     = (int) std::round (100.0f * u.getProgress());
+                suffix = juce::String::fromUTF8 ("  uploading ")
+                       + juce::String (doneMB, 1) + "/" + juce::String (totalMB, 1) + " MB"
+                       + " (" + juce::String (pct) + "%)";
+            }
+            else
+            {
+                suffix = juce::String::fromUTF8 ("  uploading…");
+            }
+            if (queued > 1) suffix << "  +" << (queued - 1);
             col = accent;
             break;
+        }
         case Uploader::State::Failed:
             suffix = juce::String::fromUTF8 (" · upload failed — retrying");
             col = juce::Colour (0xffff5a3c);

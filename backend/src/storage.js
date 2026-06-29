@@ -124,6 +124,40 @@ async function buildR2Storage() {
       const cmd = new PutObjectCommand({ Bucket, Key: key, ContentType: contentType });
       return await getSignedUrl(client, cmd, { expiresIn: expiresSec });
     },
+
+    // Multipart upload — for files where a single PUT either hangs or
+    // takes too long on a slow uplink. Used for any take whose WAV is
+    // bigger than a few MB.
+    async multipartCreate(key, contentType) {
+      const { CreateMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+      const r = await client.send(new CreateMultipartUploadCommand({
+        Bucket, Key: key, ContentType: contentType,
+      }));
+      return r.UploadId;
+    },
+    async presignPart(key, uploadId, partNumber, expiresSec = 900) {
+      const { UploadPartCommand } = await import('@aws-sdk/client-s3');
+      const cmd = new UploadPartCommand({
+        Bucket, Key: key, UploadId: uploadId, PartNumber: partNumber,
+      });
+      return await getSignedUrl(client, cmd, { expiresIn: expiresSec });
+    },
+    async multipartComplete(key, uploadId, parts) {
+      // parts: [{ PartNumber: 1, ETag: '...' }, ...]
+      const { CompleteMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+      await client.send(new CompleteMultipartUploadCommand({
+        Bucket, Key: key, UploadId: uploadId,
+        MultipartUpload: { Parts: parts },
+      }));
+    },
+    async multipartAbort(key, uploadId) {
+      const { AbortMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+      try {
+        await client.send(new AbortMultipartUploadCommand({
+          Bucket, Key: key, UploadId: uploadId,
+        }));
+      } catch {/* best effort */}
+    },
     url(key) {
       // Public custom-domain URL. R2 free egress means we can serve direct
       // from R2 instead of proxying through this server.
