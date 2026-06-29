@@ -63,18 +63,40 @@ void TakesPoller::requestDelete (const juce::String& id)
     notify();
 }
 
+void TakesPoller::requestRename (const juce::String& id, const juce::String& newName)
+{
+    {
+        const juce::ScopedLock lock (renameLock);
+        pendingRenames.push_back ({ id, newName });
+    }
+    // Optimistic local update.
+    {
+        const juce::ScopedLock lock (takesLock);
+        for (auto& t : takes) if (t.id == id) { t.note = newName; break; }
+    }
+    if (onTakesChanged)
+        juce::MessageManager::callAsync ([cb = onTakesChanged] { if (cb) cb(); });
+    notify();
+}
+
 void TakesPoller::run()
 {
     while (! threadShouldExit())
     {
-        // Drain delete queue first so user-initiated actions feel snappy.
+        // Drain user-initiated actions first so they feel snappy.
         std::vector<juce::String> toDelete;
         {
             const juce::ScopedLock lock (deleteLock);
             toDelete.swap (pendingDeletes);
         }
-        for (auto& id : toDelete)
-            doDelete (id);
+        for (auto& id : toDelete) doDelete (id);
+
+        std::vector<std::pair<juce::String, juce::String>> toRename;
+        {
+            const juce::ScopedLock lock (renameLock);
+            toRename.swap (pendingRenames);
+        }
+        for (auto& p : toRename) doRename (p.first, p.second);
 
         poll();
         wait (5000);
@@ -174,5 +196,33 @@ void TakesPoller::doDelete (const juce::String& id)
 
     if (stream != nullptr) stream->readEntireStreamAsString(); // drain
     juce::Logger::writeToLog ("[Earshot] DELETE /takes/" + id
+                               + " status=" + juce::String (statusCode));
+}
+
+void TakesPoller::doRename (const juce::String& id, const juce::String& newName)
+{
+    auto url = backendBase.getChildURL ("takes").getChildURL (id);
+
+    juce::DynamicObject::Ptr body = new juce::DynamicObject();
+    body->setProperty ("note", newName);
+    const auto json = juce::JSON::toString (juce::var (body.get()), false);
+
+    juce::String extra = "Content-Type: application/json";
+    {
+        const juce::ScopedLock lock (tokenLock);
+        if (authToken.isNotEmpty()) extra << "\r\nAuthorization: Bearer " << authToken;
+    }
+
+    int statusCode = 0;
+    juce::StringPairArray headers;
+    auto stream = url.withPOSTData (json).createInputStream (
+        juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+            .withConnectionTimeoutMs (10000)
+            .withExtraHeaders (extra)
+            .withResponseHeaders (&headers)
+            .withStatusCode (&statusCode)
+            .withHttpRequestCmd ("PATCH"));
+    if (stream != nullptr) stream->readEntireStreamAsString();
+    juce::Logger::writeToLog ("[Earshot] PATCH /takes/" + id
                                + " status=" + juce::String (statusCode));
 }

@@ -6,6 +6,7 @@
 #include "Uploader.h"
 #include "HealthPoller.h"
 #include "TakesPoller.h"
+#include "ProjectsPoller.h"
 
 class EarshotAudioProcessor : public juce::AudioProcessor
 {
@@ -53,6 +54,9 @@ public:
     // signed out. Sent as Authorization: Bearer on every API call.
     juce::String getAuthToken() const { return authToken; }
     void setAuthToken (const juce::String& tok);
+    // Read the machine-wide auth.json on first launch / new plugin
+    // instance so the user doesn't have to sign in per Ableton project.
+    void loadGlobalAuth();
 
     // Email parsed out of the JWT payload — used for the username chip.
     juce::String getUserEmail() const { return userEmail; }
@@ -74,7 +78,8 @@ public:
     TakeWriter&   getTakeWriter()   { return takeWriter; }
     Uploader&     getUploader()     { return uploader; }
     HealthPoller& getHealthPoller() { return healthPoller; }
-    TakesPoller&  getTakesPoller()  { return takesPoller; }
+    TakesPoller&    getTakesPoller()    { return takesPoller; }
+    ProjectsPoller& getProjectsPoller() { return projectsPoller; }
 
     // Future fields, surfaced for the editor.
     bool isLive() const { return liveActive.load(); }
@@ -91,8 +96,9 @@ private:
     CaptureBuffer captureBuffer;
     TakeWriter    takeWriter;
     Uploader      uploader;
-    HealthPoller  healthPoller;
-    TakesPoller   takesPoller;
+    HealthPoller    healthPoller;
+    TakesPoller     takesPoller;
+    ProjectsPoller  projectsPoller;
     std::atomic<bool> capturing    { false };
     std::atomic<bool> armRequested { false };
     bool prevCapturing { false };

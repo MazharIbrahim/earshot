@@ -40,6 +40,7 @@ public:
     void paint (juce::Graphics&) override;
 
     std::function<void(const juce::String&)> onDelete;
+    std::function<void(const juce::String& id, const juce::String& currentName)> onRename;
     static constexpr int rowHeight = 26;
     static constexpr int deleteButtonWidth = 28;
 
@@ -96,6 +97,7 @@ private:
     juce::Label  wordmark;
     juce::Label  userChip;
     juce::Label  projectLabel;
+    juce::TextButton projectMenuButton { juce::String::fromUTF8 ("▾") };
     juce::Label  statusLabel;
     LevelMeter   meter;
     juce::TextButton recButton  { "record" };

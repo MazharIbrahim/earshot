@@ -121,11 +121,13 @@ void TakesListComponent::mouseDown (const juce::MouseEvent& e)
 {
     const int row = e.y / rowHeight;
     if (row < 0 || row >= (int) takes.size()) return;
-    // Delete only if the click was inside the delete column.
+    const auto& take = takes[(size_t) row];
+
+    // Delete column → confirm + delete.
     if (e.x >= getWidth() - deleteButtonWidth)
     {
-        const auto id = takes[(size_t) row].id;
-        const auto label = takes[(size_t) row].note;
+        const auto id = take.id;
+        const auto label = take.note;
         const auto prompt = label.isNotEmpty()
             ? juce::String ("Delete \"") + label + "\"?"
             : juce::String ("Delete this take?");
@@ -141,6 +143,16 @@ void TakesListComponent::mouseDown (const juce::MouseEvent& e)
             {
                 if (result == 1 && onDelete) onDelete (id);
             });
+        return;
+    }
+
+    // Anywhere else on the row → rename.
+    if (onRename)
+    {
+        auto current = take.note.isNotEmpty()
+            ? take.note
+            : juce::Time (take.createdAtMs).formatted ("%b %-d, %-I:%M %p");
+        onRename (take.id, current);
     }
 }
 
@@ -294,6 +306,70 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     projectLabel.onTextChange = [this] { processorRef.setProjectName (projectLabel.getText()); };
     addAndMakeVisible (projectLabel);
 
+    projectMenuButton.onClick = [this]
+    {
+        juce::PopupMenu m;
+        auto projects = processorRef.getProjectsPoller().getProjects();
+        const auto current = processorRef.getProjectName();
+
+        if (projects.empty())
+        {
+            m.addItem (-1, "no projects yet", false);
+        }
+        else
+        {
+            for (size_t i = 0; i < projects.size(); ++i)
+            {
+                const auto& p = projects[i];
+                m.addItem ((int) i + 100,
+                           p.project + (p.takes ? "  (" + juce::String (p.takes) + ")"
+                                                : juce::String()),
+                           true, p.project == current);
+            }
+        }
+        m.addSeparator();
+        m.addItem (1, "+ new project…");
+
+        auto picked = std::make_shared<std::vector<ProjectsPoller::ProjectSummary>> (projects);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&projectMenuButton),
+            [this, picked] (int result)
+            {
+                if (result <= 0) return;
+                if (result == 1)
+                {
+                    auto* aw = new juce::AlertWindow ("New project",
+                                                     "Name your new project:",
+                                                     juce::MessageBoxIconType::NoIcon);
+                    aw->addTextEditor ("name", {});
+                    aw->addButton ("Create", 1, juce::KeyPress (juce::KeyPress::returnKey));
+                    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                    aw->enterModalState (true,
+                        juce::ModalCallbackFunction::create ([this, aw] (int r)
+                        {
+                            if (r == 1)
+                            {
+                                auto name = aw->getTextEditorContents ("name").trim();
+                                if (name.isNotEmpty())
+                                {
+                                    processorRef.setProjectName (name);
+                                    projectLabel.setText (name, juce::dontSendNotification);
+                                }
+                            }
+                            delete aw;
+                        }), false);
+                    return;
+                }
+                const int idx = result - 100;
+                if (idx >= 0 && idx < (int) picked->size())
+                {
+                    auto pick = (*picked)[(size_t) idx].project;
+                    processorRef.setProjectName (pick);
+                    projectLabel.setText (pick, juce::dontSendNotification);
+                }
+            });
+    };
+    addAndMakeVisible (projectMenuButton);
+
     statusLabel.setText ("idle", juce::dontSendNotification);
     statusLabel.setFont (monoFont (11.0f));
     statusLabel.setColour (juce::Label::textColourId, textMuted);
@@ -357,6 +433,25 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     takesList.onDelete = [this] (const juce::String& id)
     {
         processorRef.getTakesPoller().requestDelete (id);
+    };
+    takesList.onRename = [this] (const juce::String& id, const juce::String& currentName)
+    {
+        auto* aw = new juce::AlertWindow ("Rename take",
+                                          "Enter a new name for this take:",
+                                          juce::MessageBoxIconType::NoIcon);
+        aw->addTextEditor ("name", currentName);
+        aw->addButton ("Save",   1, juce::KeyPress (juce::KeyPress::returnKey));
+        aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        aw->enterModalState (true,
+            juce::ModalCallbackFunction::create ([this, id, aw] (int result)
+            {
+                if (result == 1)
+                {
+                    auto next = aw->getTextEditorContents ("name").trim();
+                    processorRef.getTakesPoller().requestRename (id, next);
+                }
+                delete aw;
+            }), false);
     };
     addAndMakeVisible (takesList);
 
@@ -431,7 +526,11 @@ void EarshotAudioProcessorEditor::resized()
     userChip.setBounds (topBar);
 
     r.removeFromTop (8);
-    projectLabel.setBounds (r.removeFromTop (28));
+    {
+        auto row = r.removeFromTop (28);
+        projectMenuButton.setBounds (row.removeFromRight (28));
+        projectLabel.setBounds (row);
+    }
 
     r.removeFromTop (12);
     meter.setBounds (r.removeFromTop (10));

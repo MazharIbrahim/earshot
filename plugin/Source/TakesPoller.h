@@ -38,12 +38,16 @@ public:
     // the UI updates instantly; the next poll re-syncs.
     void requestDelete (const juce::String& id);
 
+    // Fire-and-forget rename via PATCH /takes/:id { note }. Optimistic.
+    void requestRename (const juce::String& id, const juce::String& newName);
+
     std::function<void()> onTakesChanged;
 
 private:
     void run() override;
     void poll();
     void doDelete (const juce::String& id);
+    void doRename (const juce::String& id, const juce::String& newName);
 
     juce::URL backendBase { "https://app.earshot.cc" };
 
@@ -60,6 +64,9 @@ private:
     // the message thread.
     juce::CriticalSection deleteLock;
     std::vector<juce::String> pendingDeletes;
+
+    juce::CriticalSection renameLock;
+    std::vector<std::pair<juce::String, juce::String>> pendingRenames;
 
     JUCE_DECLARE_NON_COPYABLE (TakesPoller)
 };

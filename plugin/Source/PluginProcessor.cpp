@@ -13,12 +13,16 @@ EarshotAudioProcessor::EarshotAudioProcessor()
     };
     // Apply defaults to all the background workers before they start.
     setBackendBase (backendBase);
+    // Pull a previously-signed-in token from the machine-wide auth.json
+    // before we propagate. Saves the user from signing in per-instance.
+    loadGlobalAuth();
     setAuthToken (authToken);
 
     uploader.start();
     healthPoller.start();
     takesPoller.setProjectSlug (juce::String()); // set properly below
     takesPoller.start();
+    projectsPoller.start();
 
     // Keep the takes poller's project slug in sync with whatever project
     // the user names this instance. The slug must match the backend's
@@ -33,6 +37,7 @@ EarshotAudioProcessor::~EarshotAudioProcessor()
     uploader.stop();
     healthPoller.stop();
     takesPoller.stop();
+    projectsPoller.stop();
 }
 
 void EarshotAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
@@ -146,9 +151,10 @@ void EarshotAudioProcessor::setBackendBase (const juce::String& url)
     backendBase = url.trim();
     if (backendBase.endsWithChar ('/')) backendBase = backendBase.dropLastCharacters (1);
     // Propagate to anything that targets the backend.
-    healthPoller.setBackendBase (juce::URL (backendBase));
-    takesPoller.setBackendBase  (juce::URL (backendBase));
-    uploader.setEndpoint        (juce::URL (backendBase + "/takes"));
+    healthPoller.setBackendBase   (juce::URL (backendBase));
+    takesPoller.setBackendBase    (juce::URL (backendBase));
+    projectsPoller.setBackendBase (juce::URL (backendBase));
+    uploader.setEndpoint          (juce::URL (backendBase + "/takes"));
 }
 
 // Decode a base64url JWT payload to extract a single string claim.
@@ -173,13 +179,54 @@ static juce::String jwtClaim (const juce::String& jwt, const juce::String& key)
     return {};
 }
 
+// Global auth file shared across every plugin instance on this machine.
+// Set/forget for the user — sign in once, every track's plugin instance
+// (and every future session) picks it up automatically.
+static juce::File globalAuthFile()
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                   .getChildFile ("Earshot");
+    dir.createDirectory();
+    return dir.getChildFile ("auth.json");
+}
+
 void EarshotAudioProcessor::setAuthToken (const juce::String& tok)
 {
     authToken = tok.trim();
     userEmail = authToken.isNotEmpty() ? jwtClaim (authToken, "email") : juce::String();
-    uploader.setAuthToken     (authToken);
-    healthPoller.setAuthToken (authToken);
-    takesPoller.setAuthToken  (authToken);
+
+    // Persist to disk so other plugin instances (and the next DAW
+    // session) pick the same token up via loadGlobalAuth().
+    auto f = globalAuthFile();
+    if (authToken.isNotEmpty())
+    {
+        juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+        obj->setProperty ("token", authToken);
+        obj->setProperty ("email", userEmail);
+        f.replaceWithText (juce::JSON::toString (juce::var (obj.get()), true));
+    }
+    else
+    {
+        f.deleteFile();
+    }
+
+    uploader.setAuthToken       (authToken);
+    healthPoller.setAuthToken   (authToken);
+    takesPoller.setAuthToken    (authToken);
+    projectsPoller.setAuthToken (authToken);
+}
+
+void EarshotAudioProcessor::loadGlobalAuth()
+{
+    auto f = globalAuthFile();
+    if (! f.existsAsFile()) return;
+    auto v = juce::JSON::parse (f);
+    if (auto* obj = v.getDynamicObject())
+    {
+        auto tok = obj->getProperty ("token").toString();
+        if (tok.isNotEmpty() && tok != authToken)
+            setAuthToken (tok);
+    }
 }
 
 void EarshotAudioProcessor::getStateInformation (juce::MemoryBlock& dest)
