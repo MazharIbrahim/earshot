@@ -248,7 +248,7 @@ export function Project() {
       </h2>
 
       {takes.length === 0 ? (
-        <p className="empty">no takes yet — record one in ableton.</p>
+        <p className="empty">no takes yet — record one in your DAW.</p>
       ) : (
         <ul className="take-list">
           {takes.map(t => (

@@ -86,6 +86,12 @@ app.get('/healthz', (_req, res) => res.json({
 
 mountDeviceLink(app);
 
+// Tiny "who am I" endpoint. The plugin calls it after sign-in to learn
+// the user's email/handle for display in the top-right of the editor.
+app.get('/auth/me', requireAuth, (req, res) => {
+  res.json({ userId: req.userId, email: req.userEmail || null });
+});
+
 // --- Direct-to-R2 upload flow ------------------------------------------
 //
 // Render Free has a 100s request timeout. A 4-min stereo WAV (~46 MB)

@@ -151,9 +151,32 @@ void EarshotAudioProcessor::setBackendBase (const juce::String& url)
     uploader.setEndpoint        (juce::URL (backendBase + "/takes"));
 }
 
+// Decode a base64url JWT payload to extract a single string claim.
+// We intentionally don't verify the signature here — the backend does
+// that on every request; the plugin just trusts whatever it persisted.
+static juce::String jwtClaim (const juce::String& jwt, const juce::String& key)
+{
+    auto firstDot  = jwt.indexOfChar ('.');
+    if (firstDot < 0) return {};
+    auto secondDot = jwt.indexOfChar (firstDot + 1, '.');
+    if (secondDot < 0) return {};
+    auto payload = jwt.substring (firstDot + 1, secondDot);
+    // base64url → base64
+    payload = payload.replaceCharacter ('-', '+').replaceCharacter ('_', '/');
+    while (payload.length() % 4 != 0) payload += "=";
+    juce::MemoryOutputStream out;
+    if (! juce::Base64::convertFromBase64 (out, payload)) return {};
+    auto json = juce::String::fromUTF8 ((const char*) out.getData(), (int) out.getDataSize());
+    auto v = juce::JSON::parse (json);
+    if (auto* obj = v.getDynamicObject())
+        return obj->getProperty (key).toString();
+    return {};
+}
+
 void EarshotAudioProcessor::setAuthToken (const juce::String& tok)
 {
     authToken = tok.trim();
+    userEmail = authToken.isNotEmpty() ? jwtClaim (authToken, "email") : juce::String();
     uploader.setAuthToken     (authToken);
     healthPoller.setAuthToken (authToken);
     takesPoller.setAuthToken  (authToken);

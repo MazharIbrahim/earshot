@@ -76,7 +76,7 @@ void TakesListComponent::paint (juce::Graphics& g)
     {
         g.setColour (textMuted);
         g.setFont (monoFont (12.0f));
-        g.drawText (juce::String::fromUTF8 ("no takes yet — hit record while playing."),
+        g.drawText (juce::String::fromUTF8 ("no takes yet — hit record and play."),
                     getLocalBounds(), juce::Justification::topLeft, false);
         return;
     }
@@ -198,8 +198,8 @@ void QrOverlay::paint (juce::Graphics& g)
                                 (int) std::ceil (modulePx));
     }
 
-    // URL caption below.
-    auto caption = juce::Rectangle<int> (0, card.getBottom() + 18, getWidth(), 36);
+    // URL caption + helper text below.
+    auto caption = juce::Rectangle<int> (0, card.getBottom() + 18, getWidth(), 18);
     g.setColour (text);
     g.setFont (monoFont (12.0f));
     auto display = urlText.startsWith ("https://") ? urlText.substring (8)
@@ -207,10 +207,37 @@ void QrOverlay::paint (juce::Graphics& g)
                  : urlText;
     g.drawText (display, caption, juce::Justification::centred, false);
 
+    g.setColour (accent);
+    g.setFont (monoFont (11.0f, juce::Font::bold));
+    g.drawText (justCopied ? juce::String ("link copied") : juce::String ("tap link to copy"),
+                caption.translated (0, 22),
+                juce::Justification::centred, false);
+
     g.setColour (textMuted);
     g.setFont (monoFont (10.0f));
-    g.drawText ("tap anywhere to close", caption.translated (0, 18),
+    g.drawText ("scan with phone · tap elsewhere to close",
+                caption.translated (0, 42),
                 juce::Justification::centred, false);
+}
+
+void QrOverlay::mouseDown (const juce::MouseEvent& e)
+{
+    // The "tap link to copy" hot zone covers the URL text + the helper
+    // line right under it. Anywhere else dismisses.
+    const int copyZoneTop    = (getHeight() / 2 - 28) + 200; // approx below card
+    const int copyZoneBottom = copyZoneTop + 50;
+    if (urlText.isNotEmpty() && e.y >= copyZoneTop && e.y <= copyZoneBottom)
+    {
+        juce::SystemClipboard::copyTextToClipboard (urlText);
+        justCopied = true;
+        repaint();
+        juce::Timer::callAfterDelay (1200, [this]
+        {
+            if (justCopied) { setVisible (false); justCopied = false; }
+        });
+        return;
+    }
+    setVisible (false);
 }
 
 //==============================================================================
@@ -225,6 +252,11 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     wordmark.setColour (juce::Label::textColourId, textMuted);
     wordmark.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (wordmark);
+
+    userChip.setFont (monoFont (11.0f));
+    userChip.setColour (juce::Label::textColourId, textMuted);
+    userChip.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (userChip);
 
     projectLabel.setText (processorRef.getProjectName(), juce::dontSendNotification);
     projectLabel.setFont (monoFont (18.0f, juce::Font::bold));
@@ -359,7 +391,9 @@ void EarshotAudioProcessorEditor::resized()
 
     auto topBar = r.removeFromTop (24);
     wordmark.setBounds (topBar.removeFromLeft (90));
-    statusLabel.setBounds (topBar.removeFromRight (200));
+    statusLabel.setBounds (topBar.removeFromRight (180));
+    topBar.removeFromRight (8);
+    userChip.setBounds (topBar);
 
     r.removeFromTop (8);
     projectLabel.setBounds (r.removeFromTop (28));
@@ -410,11 +444,23 @@ void EarshotAudioProcessorEditor::timerCallback()
     openPhoneButton.setButtonText (
         processorRef.getAuthToken().isEmpty() ? "sign in" : "open on phone");
 
+    // Username chip: local-part of the email when signed in.
+    {
+        auto email = processorRef.getUserEmail();
+        if (email.isNotEmpty())
+        {
+            auto handle = email.upToFirstOccurrenceOf ("@", false, false);
+            userChip.setText (handle, juce::dontSendNotification);
+        }
+        else
+        {
+            userChip.setText ({}, juce::dontSendNotification);
+        }
+    }
+
     if (processorRef.isRecording())
     {
-        statusLabel.setText (juce::String::fromUTF8 ("recording · ")
-                             + juce::String (processorRef.getFramesCapturedThisTake()) + " frames",
-                             juce::dontSendNotification);
+        statusLabel.setText ("recording", juce::dontSendNotification);
         statusLabel.setColour (juce::Label::textColourId, accent);
     }
     else if (processorRef.isWaitingForPlay())
@@ -486,27 +532,10 @@ void EarshotAudioProcessorEditor::refreshUploadStatus()
                 : juce::String::fromUTF8 (" · synced");
             break;
         case Uploader::State::Uploading:
-        {
-            // Show real progress in MB so user can see slow uploads moving.
-            const auto total = u.getCurrentJobTotalBytes();
-            const auto done  = u.getCurrentJobUploadedBytes();
-            if (total > 0)
-            {
-                const float doneMB  = (float) done  / (1024.0f * 1024.0f);
-                const float totalMB = (float) total / (1024.0f * 1024.0f);
-                const int   pct     = (int) std::round (100.0f * u.getProgress());
-                suffix = juce::String::fromUTF8 ("  uploading ")
-                       + juce::String (doneMB, 1) + "/" + juce::String (totalMB, 1) + " MB"
-                       + " (" + juce::String (pct) + "%)";
-            }
-            else
-            {
-                suffix = juce::String::fromUTF8 ("  uploading…");
-            }
+            suffix = juce::String::fromUTF8 ("  uploading…");
             if (queued > 1) suffix << "  +" << (queued - 1);
             col = accent;
             break;
-        }
         case Uploader::State::Failed:
             suffix = juce::String::fromUTF8 (" · upload failed — retrying");
             col = juce::Colour (0xffff5a3c);

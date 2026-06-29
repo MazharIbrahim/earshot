@@ -55,9 +55,12 @@ public:
     QrOverlay() { setAlwaysOnTop (true); }
     void setUrl (const juce::String& url);
     void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override { setVisible (false); }
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
+    // True for a brief moment after the user tapped "copy link" so the
+    // overlay can flash a confirmation before dismissing.
+    bool justCopied { false };
     juce::String urlText;
     // 1 byte per module (0 or 1). Square grid.
     std::vector<uint8_t> qr;
@@ -86,6 +89,7 @@ private:
     BrandLookAndFeel lnf;
 
     juce::Label  wordmark;
+    juce::Label  userChip;
     juce::Label  projectLabel;
     juce::Label  statusLabel;
     LevelMeter   meter;

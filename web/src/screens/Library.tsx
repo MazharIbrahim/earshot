@@ -29,7 +29,7 @@ export function Library() {
   if (projects.length === 0) {
     return (
       <p className="empty">
-        no takes yet — record one in ableton and it'll appear here.
+        no takes yet — record one in your DAW and it'll appear here.
       </p>
     );
   }

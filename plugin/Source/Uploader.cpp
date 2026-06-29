@@ -1,4 +1,6 @@
 #include "Uploader.h"
+#include <thread>
+#include <vector>
 
 Uploader::Uploader() : juce::Thread ("Earshot Uploader") {}
 
@@ -207,7 +209,7 @@ bool Uploader::postOne (const Job& job)
         return false;
     }
 
-    // ---------- Step 2: read file + upload each part ----------
+    // ---------- Step 2: read file + upload parts in parallel ----------
     juce::MemoryBlock wavBlock;
     if (! job.file.loadFileAsData (wavBlock))
     {
@@ -217,16 +219,25 @@ bool Uploader::postOne (const Job& job)
     const juce::int64 totalBytes = (juce::int64) wavBlock.getSize();
     currentJobTotalBytes.store (totalBytes);
 
+    const int numParts = (int) ((totalBytes + partSize - 1) / partSize);
     juce::Array<juce::var> partsForComplete;
-    juce::int64 offset = 0;
-    int partNumber = 0;
-    while (offset < totalBytes)
+    partsForComplete.resize (numParts);
+
+    // ETags can come back out of order from parallel workers; track each
+    // by index so we can stitch them into the correct partNumber order.
+    std::vector<std::atomic<juce::int64>> partDone (numParts);
+    for (auto& a : partDone) a.store (0);
+    std::atomic<bool> anyFailed { false };
+    juce::CriticalSection partsListLock;
+
+    auto uploadOnePart = [&] (int partIndex)
     {
-        if (threadShouldExit()) return false;
-        ++partNumber;
+        if (anyFailed.load() || threadShouldExit()) return;
+        const int partNumber = partIndex + 1;
+        const juce::int64 offset   = (juce::int64) partIndex * partSize;
         const juce::int64 thisSize = juce::jmin (partSize, totalBytes - offset);
 
-        // Get a signed URL for this part.
+        // 1. ask backend for a signed URL for this part
         juce::DynamicObject::Ptr signBody = new juce::DynamicObject();
         signBody->setProperty ("wavKey",     wavKey);
         signBody->setProperty ("uploadId",   uploadId);
@@ -238,16 +249,16 @@ bool Uploader::postOne (const Job& job)
                                  token, {}, &signStatus);
         if (signStatus < 200 || signStatus >= 300)
         {
-            setState (State::Failed, "sign " + juce::String (signStatus));
+            anyFailed.store (true);
             juce::Logger::writeToLog ("[Earshot] sign-part " + juce::String (partNumber)
                                        + " failed status=" + juce::String (signStatus));
-            return false;
+            return;
         }
         auto* signObj = signVar.getDynamicObject();
         const auto partUrl = signObj ? signObj->getProperty ("url").toString() : juce::String();
-        if (partUrl.isEmpty()) { setState (State::Failed, "sign: no url"); return false; }
+        if (partUrl.isEmpty()) { anyFailed.store (true); return; }
 
-        // PUT the chunk.
+        // 2. PUT the chunk
         juce::MemoryBlock chunk (static_cast<const char*> (wavBlock.getData()) + offset, (size_t) thisSize);
         juce::URL partPutUrl (partUrl);
         juce::StringPairArray respHeaders;
@@ -256,45 +267,65 @@ bool Uploader::postOne (const Job& job)
             .withPOSTData (chunk)
             .createInputStream (
                 juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                    .withConnectionTimeoutMs (120000) // 2 min per 8 MB part
+                    .withConnectionTimeoutMs (120000)
                     .withResponseHeaders (&respHeaders)
                     .withStatusCode (&putStatus)
                     .withHttpRequestCmd ("PUT"));
 
         if (putStream == nullptr || putStatus < 200 || putStatus >= 300)
         {
-            setState (State::Failed, "part " + juce::String (partNumber)
-                       + " failed (" + juce::String (putStatus) + ")");
+            anyFailed.store (true);
             juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
                                        + " PUT failed status=" + juce::String (putStatus));
-            return false;
+            return;
         }
-        putStream->readEntireStreamAsString(); // drain
+        putStream->readEntireStreamAsString();
 
-        // ETag from R2's response — strip quotes that S3-compatible APIs wrap it in.
-        auto etag = respHeaders.getValue ("ETag", respHeaders.getValue ("etag", ""));
-        etag = etag.unquoted();
-        if (etag.isEmpty())
-        {
-            setState (State::Failed, "part " + juce::String (partNumber) + ": no etag");
-            return false;
-        }
+        auto etag = respHeaders.getValue ("ETag", respHeaders.getValue ("etag", "")).unquoted();
+        if (etag.isEmpty()) { anyFailed.store (true); return; }
 
         juce::DynamicObject::Ptr pe = new juce::DynamicObject();
         pe->setProperty ("partNumber", partNumber);
         pe->setProperty ("etag",       etag);
-        partsForComplete.add (juce::var (pe.get()));
+        {
+            const juce::ScopedLock lock (partsListLock);
+            partsForComplete.set (partIndex, juce::var (pe.get()));
+        }
+        partDone[(size_t) partIndex].store (thisSize);
 
-        offset += thisSize;
-        currentJobUploadedBytes.store (offset);
-        progress.store ((float) offset / (float) totalBytes);
-        // Notify UI of progress.
+        // Aggregate progress across all workers.
+        juce::int64 sum = 0;
+        for (auto& a : partDone) sum += a.load();
+        currentJobUploadedBytes.store (sum);
+        progress.store ((float) sum / (float) totalBytes);
         if (onStateChanged)
             juce::MessageManager::callAsync ([cb = onStateChanged] { if (cb) cb(); });
+    };
 
-        juce::Logger::writeToLog ("[Earshot] part " + juce::String (partNumber)
-                                   + "/" + juce::String ((totalBytes + partSize - 1) / partSize)
-                                   + " ok (" + juce::String (offset / 1024) + " KB)");
+    // Worker pool: up to 4 concurrent PUTs. Net effect on home uplinks is
+    // limited by total bandwidth, but R2 / TLS / NAT idle quirks no longer
+    // serialize behind one slow chunk.
+    constexpr int kMaxConcurrent = 4;
+    std::vector<std::thread> workers;
+    std::atomic<int> nextPart { 0 };
+    for (int w = 0; w < juce::jmin (kMaxConcurrent, numParts); ++w)
+    {
+        workers.emplace_back ([&]
+        {
+            while (! anyFailed.load() && ! threadShouldExit())
+            {
+                const int idx = nextPart.fetch_add (1);
+                if (idx >= numParts) break;
+                uploadOnePart (idx);
+            }
+        });
+    }
+    for (auto& t : workers) if (t.joinable()) t.join();
+
+    if (anyFailed.load() || threadShouldExit())
+    {
+        setState (State::Failed, "one or more parts failed");
+        return false;
     }
 
     // ---------- Step 3: complete the multipart upload ----------
@@ -321,7 +352,7 @@ bool Uploader::postOne (const Job& job)
     }
 
     juce::Logger::writeToLog ("[Earshot] uploaded ok takeId=" + takeId
-                               + " parts=" + juce::String (partNumber));
+                               + " parts=" + juce::String (numParts));
     progress.store (1.0f);
     return true;
 }

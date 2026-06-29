@@ -54,6 +54,9 @@ public:
     juce::String getAuthToken() const { return authToken; }
     void setAuthToken (const juce::String& tok);
 
+    // Email parsed out of the JWT payload — used for the username chip.
+    juce::String getUserEmail() const { return userEmail; }
+
     // Arm-and-wait recording: when armed, the audio thread starts a take
     // the next time the host transport plays, and ends it when transport stops.
     void setArmed (bool shouldArm) { armRequested.store (shouldArm); }
@@ -81,6 +84,7 @@ private:
     juce::String projectName { "Untitled" };
     juce::String backendBase { "https://app.earshot.cc" };
     juce::String authToken;
+    juce::String userEmail;
     std::atomic<bool> liveActive { false };
     std::atomic<int>  listeners  { 0 };
 
