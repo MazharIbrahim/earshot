@@ -148,6 +148,13 @@ void TakesListComponent::mouseDown (const juce::MouseEvent& e)
 void QrOverlay::setUrl (const juce::String& url)
 {
     urlText = url;
+    if (url.isEmpty())
+    {
+        qrSize = 0;
+        qr.clear();
+        repaint();
+        return;
+    }
 
     // Build QR code with nayuki's encoder. Medium error correction is a
     // good balance for laptop screen photos taken in mixed lighting.
@@ -183,6 +190,22 @@ void QrOverlay::paint (juce::Graphics& g)
                     .withCentre ({ getWidth() / 2, getHeight() / 2 - 28 });
     g.setColour (juce::Colours::white);
     g.fillRoundedRectangle (card.toFloat().expanded (12.0f), 14.0f);
+
+    // Placeholder while waiting for the backend to mint a device code.
+    if (urlText.isEmpty())
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.5f));
+        g.setFont (monoFont (13.0f));
+        g.drawText ("preparing sign-in…", card,
+                    juce::Justification::centred, false);
+
+        g.setColour (textMuted);
+        g.setFont (monoFont (10.0f));
+        g.drawText ("tap to cancel",
+                    juce::Rectangle<int> (0, card.getBottom() + 40, getWidth(), 18),
+                    juce::Justification::centred, false);
+        return;
+    }
 
     // Draw QR modules.
     if (qrSize > 0)
@@ -224,20 +247,26 @@ void QrOverlay::mouseDown (const juce::MouseEvent& e)
 {
     // The "tap link to copy" hot zone covers the URL text + the helper
     // line right under it. Anywhere else dismisses.
-    const int copyZoneTop    = (getHeight() / 2 - 28) + 200; // approx below card
+    const int copyZoneTop    = (getHeight() / 2 - 28) + 200;
     const int copyZoneBottom = copyZoneTop + 50;
     if (urlText.isNotEmpty() && e.y >= copyZoneTop && e.y <= copyZoneBottom)
     {
         juce::SystemClipboard::copyTextToClipboard (urlText);
         justCopied = true;
         repaint();
-        juce::Timer::callAfterDelay (1200, [this]
+        juce::Timer::callAfterDelay (1200, [sp = juce::Component::SafePointer<QrOverlay> (this)]
         {
-            if (justCopied) { setVisible (false); justCopied = false; }
+            if (sp != nullptr && sp->justCopied)
+            {
+                sp->setVisible (false);
+                sp->justCopied = false;
+                if (sp->onDismissed) sp->onDismissed();
+            }
         });
         return;
     }
     setVisible (false);
+    if (onDismissed) onDismissed();
 }
 
 //==============================================================================
@@ -284,8 +313,11 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
     {
         if (processorRef.getAuthToken().isEmpty())
         {
-            // No token → start device-link flow.
+            // No token → start device-link flow. Show the overlay
+            // immediately with a placeholder; the URL gets filled in
+            // by the timer once the backend returns it.
             signInFlow.start (juce::URL (processorRef.getBackendBase()));
+            showQrFor (juce::String());
         }
         else
         {
@@ -296,6 +328,9 @@ EarshotAudioProcessorEditor::EarshotAudioProcessorEditor (EarshotAudioProcessor&
         }
     };
     addAndMakeVisible (openPhoneButton);
+
+    // User dismissed the overlay — cancel any in-flight sign-in attempt.
+    qrOverlay.onDismissed = [this] { signInFlow.cancel(); };
 
     signInFlow.onLinked = [this] (const juce::String& token)
     {
@@ -430,23 +465,16 @@ void EarshotAudioProcessorEditor::timerCallback()
     updateRecButton();
     refreshUploadStatus(); // keep the per-MB progress moving
 
-    // While the sign-in flow is mid-poll, keep the QR overlay showing
-    // the device-link URL — UNLESS the user already dismissed the
-    // overlay (in which case we cancel the flow instead of re-opening).
-    if (signInFlow.isThreadRunning() && processorRef.getAuthToken().isEmpty())
+    // While the sign-in flow is running AND the overlay is visible,
+    // sync the URL into the overlay once the backend returns it.
+    // Dismissal is handled by QrOverlay::onDismissed, not here.
+    if (signInFlow.isThreadRunning()
+        && processorRef.getAuthToken().isEmpty()
+        && qrOverlay.isVisible())
     {
-        if (qrOverlay.isVisible())
-        {
-            // Overlay is up: keep the URL in sync (in case poll just got it).
-            auto url = signInFlow.getRedeemUrl();
-            if (url.isNotEmpty() && qrOverlay.getCurrentUrl() != url)
-                showQrFor (url);
-        }
-        else
-        {
-            // User dismissed it — abort the sign-in attempt cleanly.
-            signInFlow.cancel();
-        }
+        auto url = signInFlow.getRedeemUrl();
+        if (url.isNotEmpty() && qrOverlay.getCurrentUrl() != url)
+            qrOverlay.setUrl (url);
     }
 
     // Keep the "open on phone" button label in sync with auth state.

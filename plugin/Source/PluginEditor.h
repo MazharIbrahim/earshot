@@ -58,6 +58,10 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
 
+    // Fires when the user dismisses the overlay (clicks anywhere off the
+    // copy-link zone). Editor uses it to cancel an in-flight sign-in.
+    std::function<void()> onDismissed;
+
 private:
     // True for a brief moment after the user tapped "copy link" so the
     // overlay can flash a confirmation before dismissing.
