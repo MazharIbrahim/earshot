@@ -4,7 +4,10 @@ import { fmtRelative } from '../data';
 
 type Member = { email: string; userId: string | null; role: string; invitedAt: number };
 
-export function Members({ projectId, projectName }: { projectId: string; projectName?: string }) {
+export function Members({ projectId, projectName, ownerOnly }: {
+  projectId: string; projectName?: string; ownerOnly?: boolean;
+}) {
+  const [isOwner, setIsOwner] = useState<boolean | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -18,7 +21,14 @@ export function Members({ projectId, projectName }: { projectId: string; project
     } catch { setMembers([]); }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [projectId]);
+  useEffect(() => {
+    // Owner status: PWA hides the whole invite UI for collaborators.
+    api.project(projectId)
+      .then(p => setIsOwner(p.isOwner))
+      .catch(() => setIsOwner(false));
+    load();
+    /* eslint-disable-next-line */
+  }, [projectId]);
 
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,6 +55,11 @@ export function Members({ projectId, projectName }: { projectId: string; project
   };
 
   const memberCount = members?.length ?? 0;
+
+  // Hide the whole panel for non-owners so collaborators don't see
+  // (or attempt) an invite UI they're not allowed to use.
+  if (ownerOnly && isOwner === false) return null;
+  if (ownerOnly && isOwner === null) return null; // wait for owner check
 
   return (
     <section style={{ marginTop: 22 }}>

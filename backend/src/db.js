@@ -527,6 +527,15 @@ function buildSupabase() {
       });
     },
 
+    // True when the user has at least one take in (userId, projectId) —
+    // i.e. they're the project's real owner, not just a collaborator.
+    async ownsProject(userId, projectId) {
+      const rows = await pg('GET',
+        `/takes?select=id&user_id=eq.${encodeURIComponent(userId)}` +
+        `&project_id=eq.${encodeURIComponent(projectId)}&limit=1`);
+      return !!(rows && rows.length);
+    },
+
     // ---------- access checks ----------
     // Can this user read/write a take?  Owner: yes (asOwner).  Project
     // member: yes (asMember + role).  Otherwise no.

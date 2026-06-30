@@ -120,6 +120,11 @@ export const api = {
     stripeCustomerId: string | null; proSince: number | null;
   }>('/profile'),
 
+  // Project info (role for current user)
+  project: (projectId: string) =>
+    get<{ projectId: string; role: string; isOwner: boolean }>(
+      `/projects/${projectId}`),
+
   // Collaborators
   listMembers: (projectId: string) =>
     get<{ email: string; userId: string | null; role: string; invitedAt: number }[]>

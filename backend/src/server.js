@@ -262,12 +262,49 @@ async function isWithinTierLimits(userId, projectSlug) {
 
 
 // ---------- Project members (collaborators) ----------
+// Helper: returns 403 if the caller doesn't own the project.
+async function requireProjectOwner(req, res) {
+  const owns = await db.ownsProject(req.userId, req.params.id);
+  if (!owns) {
+    res.status(403).json({ error: 'only the project owner can do this' });
+    return false;
+  }
+  return true;
+}
+
+// Lightweight "what's my relationship to this project" lookup. PWA hits
+// this so it knows whether to render the invite UI / edit controls.
+app.get('/projects/:id', requireAuth, async (req, res) => {
+  const owns = await db.ownsProject(req.userId, req.params.id);
+  if (owns) {
+    return res.json({ projectId: req.params.id, role: 'owner', isOwner: true });
+  }
+  // Maybe a collaborator?
+  const filterParts = [`member_user_id.eq.${encodeURIComponent(req.userId)}`];
+  if (req.userEmail) filterParts.push(`member_email.eq.${encodeURIComponent(req.userEmail.toLowerCase())}`);
+  // db doesn't have a helper for this; call PostgREST directly via the
+  // service key.
+  const r = await fetch(
+    `${process.env.SUPABASE_URL}/rest/v1/project_members?select=role,owner_user_id` +
+    `&project_id=eq.${encodeURIComponent(req.params.id)}` +
+    `&or=(${filterParts.join(',')})&limit=1`,
+    { headers: { apikey: process.env.SUPABASE_SERVICE_KEY,
+                 Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}` }});
+  const rows = r.ok ? await r.json() : [];
+  if (rows.length) {
+    return res.json({ projectId: req.params.id, role: rows[0].role, isOwner: false });
+  }
+  return res.status(404).json({ error: 'no access to this project' });
+});
+
 app.get('/projects/:id/members', requireAuth, async (req, res) => {
-  // List members for a project the user owns.
+  // Only the owner sees the member list.
+  if (!await requireProjectOwner(req, res)) return;
   res.json(await db.listProjectMembers(req.userId, req.params.id));
 });
 
 app.post('/projects/:id/members', requireAuth, async (req, res) => {
+  if (!await requireProjectOwner(req, res)) return;
   const email = String(req.body?.email || '').trim().toLowerCase();
   const role = ['viewer', 'commenter', 'editor'].includes(req.body?.role)
     ? req.body.role : 'viewer';
@@ -305,6 +342,7 @@ app.post('/projects/:id/members', requireAuth, async (req, res) => {
 });
 
 app.delete('/projects/:id/members/:email', requireAuth, async (req, res) => {
+  if (!await requireProjectOwner(req, res)) return;
   const ok = await db.removeProjectMember(req.userId, req.params.id,
                                           decodeURIComponent(req.params.email));
   if (!ok) return res.status(404).end();
