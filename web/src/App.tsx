@@ -39,13 +39,46 @@ function Shell() {
   const [tier, setTier] = useState<'free' | 'pro' | 'studio' | null>(null);
   useEffect(() => {
     api.profile().then(p => setTier(p.tier)).catch(() => setTier('free'));
+    // After a successful checkout LS redirects with ?upgrade=success.
+    // Re-poll the profile every 3 s for ~30 s so the chip flips to Pro
+    // once the webhook lands.
+    if (window.location.search.includes('upgrade=success')) {
+      let n = 0;
+      const t = setInterval(async () => {
+        try { const p = await api.profile(); if (p.tier !== 'free') setTier(p.tier); } catch {}
+        if (++n > 10) clearInterval(t);
+      }, 3000);
+    }
   }, []);
+
+  const upgrade = async () => {
+    try {
+      const { url } = await api.createCheckout();
+      window.location.href = url;
+    } catch {/* not configured yet */}
+  };
 
   return (
     <div className="app">
       <header className="topbar">
         <Link to="/" className="wordmark">EARSHOT</Link>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {tier === 'free' && (
+            <button
+              onClick={upgrade}
+              className="chip"
+              title="Unlimited projects, comments, collaborators, no expiry"
+              style={{
+                background: 'var(--accent)',
+                color: 'var(--bg)',
+                borderColor: 'var(--accent)',
+                cursor: 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              upgrade to pro
+            </button>
+          )}
           {tier && tier !== 'free' && (
             <span className="chip" style={{
               background: 'color-mix(in srgb, var(--accent) 20%, transparent)',

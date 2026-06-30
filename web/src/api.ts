@@ -131,4 +131,7 @@ export const api = {
 
   // Shared-with-me inbox
   inbox: () => get<{ token: string; take: ApiTake }[]>('/shared-with-me'),
+
+  // Billing
+  createCheckout: () => post<{ url: string }>('/billing/checkout'),
 };

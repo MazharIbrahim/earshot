@@ -26,6 +26,7 @@ import { openDb } from './db.js';
 import { requireAuth, maybeAuth } from './auth.js';
 import { mountDeviceLink } from './devicelink.js';
 import { sendMail, collabInviteEmail } from './mailer.js';
+import { createCheckout, verifyWebhookSignature, tierFromWebhook } from './billing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -321,6 +322,69 @@ app.get('/shared-with-me', requireAuth, async (req, res) => {
 });
 
 // Share recipient is handled inline in POST /takes/:id/share above.
+
+
+// ---------- Billing (LemonSqueezy) ----------
+//
+// POST /billing/checkout : authenticated user → returns LS checkout URL.
+// POST /billing/webhook  : LS calls this with subscription lifecycle
+//                          events. We verify the HMAC and update tier.
+
+app.post('/billing/checkout', requireAuth, async (req, res) => {
+  const variantId = process.env.LEMONSQUEEZY_PRO_VARIANT_ID;
+  const storeId   = process.env.LEMONSQUEEZY_STORE_ID;
+  if (!variantId || !storeId) {
+    return res.status(501).json({
+      error: 'billing not configured',
+      detail: 'LEMONSQUEEZY_PRO_VARIANT_ID + LEMONSQUEEZY_STORE_ID needed',
+    });
+  }
+  try {
+    const url = await createCheckout({
+      userId: req.userId,
+      email: req.userEmail,
+      variantId, storeId,
+    });
+    if (!url) return res.status(500).json({ error: 'checkout url missing' });
+    res.json({ url });
+  } catch (e) {
+    console.error('[billing] checkout:', e.message);
+    res.status(500).json({ error: 'checkout failed' });
+  }
+});
+
+// LS webhook. The global express.json() middleware would parse + lose
+// the raw body, so we mount a raw parser specifically for this route.
+app.post('/billing/webhook',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  async (req, res) => {
+    const sig = req.get('x-signature') || '';
+    const raw = req.body; // Buffer
+    if (!verifyWebhookSignature(raw, sig)) {
+      console.warn('[billing] webhook bad signature');
+      return res.status(401).end();
+    }
+    let payload;
+    try { payload = JSON.parse(raw.toString('utf8')); }
+    catch { return res.status(400).end(); }
+
+    const event = req.get('x-event-name')
+                 || payload?.meta?.event_name || '';
+    const customUserId = payload?.meta?.custom_data?.user_id
+                       || payload?.data?.attributes?.first_subscription_item?.custom_data?.user_id
+                       || null;
+    const tier = tierFromWebhook(event, payload);
+    console.log(`[billing] event=${event} tier=${tier} user=${customUserId}`);
+
+    if (tier && customUserId) {
+      const extra = tier === 'pro' ? { pro_since: Date.now() } : {};
+      try { await db.setProfileTier(customUserId, tier, extra); }
+      catch (e) { console.error('[billing] setProfileTier:', e.message); }
+    }
+
+    res.json({ ok: true }); // always 200 so LS doesn't retry on our bugs
+  });
+
 
 // --- Direct-to-R2 upload flow ------------------------------------------
 //
