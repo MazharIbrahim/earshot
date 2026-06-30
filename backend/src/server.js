@@ -45,6 +45,12 @@ const slug = (s) => (s || 'untitled')
 // ---------- App ----------
 const app = express();
 app.use(cors());
+// LemonSqueezy webhook must read the RAW body for HMAC verification.
+// Mount its raw parser BEFORE express.json() — otherwise json() wins and
+// req.body arrives as a parsed Object that can't be hashed.
+app.post('/billing/webhook',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  async (req, res, next) => { req._rawBody = req.body; next(); });
 app.use(express.json());
 
 // Light request log so we can see what the plugin is actually sending.
@@ -391,13 +397,12 @@ app.post('/billing/checkout', requireAuth, async (req, res) => {
   }
 });
 
-// LS webhook. The global express.json() middleware would parse + lose
-// the raw body, so we mount a raw parser specifically for this route.
+// LS webhook handler — raw body is captured up top in the pre-json
+// middleware and stashed on req._rawBody.
 app.post('/billing/webhook',
-  express.raw({ type: 'application/json', limit: '1mb' }),
   async (req, res) => {
     const sig = req.get('x-signature') || '';
-    const raw = req.body; // Buffer
+    const raw = req._rawBody; // Buffer, set by the pre-json raw parser
     if (!verifyWebhookSignature(raw, sig)) {
       console.warn('[billing] webhook bad signature');
       return res.status(401).end();
