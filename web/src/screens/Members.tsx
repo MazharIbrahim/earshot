@@ -4,7 +4,7 @@ import { fmtRelative } from '../data';
 
 type Member = { email: string; userId: string | null; role: string; invitedAt: number };
 
-export function Members({ projectId }: { projectId: string }) {
+export function Members({ projectId, projectName }: { projectId: string; projectName?: string }) {
   const [members, setMembers] = useState<Member[] | null>(null);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -26,7 +26,7 @@ export function Members({ projectId }: { projectId: string }) {
     setBusy(true);
     setErr(null);
     try {
-      await api.addMember(projectId, email.trim().toLowerCase(), 'viewer');
+      await api.addMember(projectId, email.trim().toLowerCase(), 'viewer', projectName);
       setEmail('');
       load();
     } catch (e: any) {

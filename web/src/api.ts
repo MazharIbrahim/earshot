@@ -124,8 +124,8 @@ export const api = {
   listMembers: (projectId: string) =>
     get<{ email: string; userId: string | null; role: string; invitedAt: number }[]>
       (`/projects/${projectId}/members`),
-  addMember: (projectId: string, email: string, role = 'viewer') =>
-    post(`/projects/${projectId}/members`, { email, role }),
+  addMember: (projectId: string, email: string, role = 'viewer', projectName?: string) =>
+    post(`/projects/${projectId}/members`, { email, role, projectName }),
   removeMember: (projectId: string, email: string) =>
     del(`/projects/${projectId}/members/${encodeURIComponent(email)}`),
 

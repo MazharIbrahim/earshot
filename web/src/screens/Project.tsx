@@ -247,7 +247,7 @@ export function Project() {
         )}
       </div>
 
-      {id && <Members projectId={id} />}
+      {id && <Members projectId={id} projectName={projectName} />}
 
       {activeTake && (
         <Comments

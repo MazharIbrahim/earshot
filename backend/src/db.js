@@ -223,33 +223,78 @@ function buildSupabase() {
       return rows?.[0] ? toApi(rows[0]) : null;
     },
 
-    async listProjects(userId) {
-      const rows = await pg('GET',
-        `/takes?select=project_id,project,created_at&${ownerFilter(userId)}&order=created_at.desc`);
-      const byId = new Map();
-      for (const r of rows || []) {
-        const existing = byId.get(r.project_id);
+    async listProjects(userId, email) {
+      // 1) Projects the user owns.
+      const ownRows = await pg('GET',
+        `/takes?select=project_id,project,created_at,user_id` +
+        `&${ownerFilter(userId)}&order=created_at.desc`);
+
+      // 2) Projects the user is a member of (collaborator).
+      const memberships = userId ? await this.listSharedProjects(userId, email) : [];
+
+      // For each membership, fetch the takes that belong to that
+      // (owner, project_id) pair so we can compute counts and the
+      // last activity timestamp.
+      const collabRows = [];
+      for (const m of memberships) {
+        const rows = await pg('GET',
+          `/takes?select=project_id,project,created_at,user_id` +
+          `&user_id=eq.${encodeURIComponent(m.ownerUserId)}` +
+          `&project_id=eq.${encodeURIComponent(m.projectId)}` +
+          `&order=created_at.desc`);
+        for (const r of (rows || [])) collabRows.push(r);
+      }
+
+      const byKey = new Map(); // key includes owner so two people's
+                               // identically-named projects don't collide
+      const ingest = (r, isShared) => {
+        const ownerId = r.user_id ?? userId ?? '_';
+        const key = `${ownerId}|${r.project_id}`;
+        const existing = byKey.get(key);
         if (existing) {
           existing.takes++;
           if (r.created_at > existing.latestCreatedAt) existing.latestCreatedAt = r.created_at;
         } else {
-          byId.set(r.project_id, {
+          byKey.set(key, {
             projectId: r.project_id,
             project: r.project,
             takes: 1,
             latestCreatedAt: r.created_at,
+            ownerUserId: ownerId,
+            isShared,
           });
         }
-      }
-      return Array.from(byId.values())
+      };
+      for (const r of ownRows || []) ingest(r, false);
+      for (const r of collabRows)   ingest(r, true);
+
+      return Array.from(byKey.values())
         .sort((a, b) => b.latestCreatedAt - a.latestCreatedAt);
     },
 
-    async listTakes(projectId, userId) {
-      const rows = await pg('GET',
+    async listTakes(projectId, userId, email) {
+      // Try as owner first.
+      const own = await pg('GET',
         `/takes?select=id,project,project_id,duration_sec,bytes,note,created_at` +
         `&project_id=eq.${encodeURIComponent(projectId)}` +
         `&${ownerFilter(userId)}&order=created_at.desc`);
+      if (own?.length) return own.map(toApi);
+
+      // Maybe the user is a member instead — find the owner and re-fetch.
+      const filterParts = [`member_user_id.eq.${encodeURIComponent(userId)}`];
+      if (email) filterParts.push(`member_email.eq.${encodeURIComponent(email.toLowerCase())}`);
+      const memberships = await pg('GET',
+        `/project_members?select=owner_user_id` +
+        `&project_id=eq.${encodeURIComponent(projectId)}` +
+        `&or=(${filterParts.join(',')})&limit=1`);
+      const owner = memberships?.[0]?.owner_user_id;
+      if (!owner) return [];
+
+      const rows = await pg('GET',
+        `/takes?select=id,project,project_id,duration_sec,bytes,note,created_at` +
+        `&user_id=eq.${encodeURIComponent(owner)}` +
+        `&project_id=eq.${encodeURIComponent(projectId)}` +
+        `&order=created_at.desc`);
       return (rows || []).map(toApi);
     },
 
@@ -399,10 +444,14 @@ function buildSupabase() {
     },
     // Returns projects the user has been invited to as a member (not owned).
     async listSharedProjects(userId, email) {
+      // Member emails are stored lowercased on insert, so a direct eq
+      // filter works without needing lower() (which PostgREST doesn't
+      // allow inside filter expressions).
+      const filterParts = [`member_user_id.eq.${encodeURIComponent(userId)}`];
+      if (email) filterParts.push(`member_email.eq.${encodeURIComponent(email.toLowerCase())}`);
       const rows = await pg('GET',
         `/project_members?select=owner_user_id,project_id,role` +
-        `&or=(member_user_id.eq.${encodeURIComponent(userId)},` +
-        `lower(member_email).eq.${encodeURIComponent(email.toLowerCase())})`);
+        `&or=(${filterParts.join(',')})`);
       return (rows || []).map(r => ({
         ownerUserId: r.owner_user_id,
         projectId: r.project_id,
@@ -412,9 +461,10 @@ function buildSupabase() {
     // When a user signs in, claim any pending email-only invites by
     // backfilling their user_id.
     async claimPendingMemberships(userId, email) {
+      if (!email) return;
       try {
         await pg('PATCH',
-          `/project_members?lower(member_email).eq.${encodeURIComponent(email.toLowerCase())}` +
+          `/project_members?member_email=eq.${encodeURIComponent(email.toLowerCase())}` +
           `&member_user_id=is.null`,
           { body: { member_user_id: userId } });
       } catch {/* best effort */}
@@ -430,9 +480,10 @@ function buildSupabase() {
     },
     async listInbox(email) {
       // Get share tokens addressed to this email + their take metadata.
+      // invited_email is stored lowercased on insert (see addShareRecipient).
       const rows = await pg('GET',
         `/share_recipients?select=token,share_tokens(token,take_id,created_by,created_at,takes(id,project,project_id,duration_sec,bytes,note,created_at))` +
-        `&lower(invited_email)=eq.${encodeURIComponent(email.toLowerCase())}` +
+        `&invited_email=eq.${encodeURIComponent(email.toLowerCase())}` +
         `&order=invited_at.desc`);
       return (rows || [])
         .filter(r => r.share_tokens && r.share_tokens.takes)

@@ -25,6 +25,7 @@ import { getStorage } from './storage.js';
 import { openDb } from './db.js';
 import { requireAuth, maybeAuth } from './auth.js';
 import { mountDeviceLink } from './devicelink.js';
+import { sendMail, collabInviteEmail } from './mailer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR  = path.join(__dirname, '..', 'data');
@@ -288,6 +289,17 @@ app.post('/projects/:id/members', requireAuth, async (req, res) => {
       }
     }
   } catch {/* non-fatal */}
+
+  // Fire the invite email (no-op when EARSHOT_MAILER=off, which is the
+  // current default until Resend is set up).
+  const projectName = (req.body?.projectName || req.params.id).toString().slice(0, 200);
+  const inviteUrl = `https://app.earshot.cc/p/${encodeURIComponent(req.params.id)}`;
+  const { subject, text, html } = collabInviteEmail({
+    inviterEmail: req.userEmail || 'A collaborator',
+    projectName,
+    inviteUrl,
+  });
+  sendMail({ to: email, subject, html, text }).catch(() => {});
 
   res.json(row);
 });
@@ -683,11 +695,11 @@ app.post('/takes', requireAuth, upload.single('audio'), async (req, res) => {
 });
 
 app.get('/projects', requireAuth, async (req, res) => {
-  res.json(await db.listProjects(req.userId));
+  res.json(await db.listProjects(req.userId, req.userEmail || null));
 });
 
 app.get('/projects/:id/takes', requireAuth, async (req, res) => {
-  res.json(await db.listTakes(req.params.id, req.userId));
+  res.json(await db.listTakes(req.params.id, req.userId, req.userEmail || null));
 });
 
 // DELETE /takes/:id — remove from storage + DB. Idempotent: a 404 is
