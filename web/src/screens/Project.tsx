@@ -3,6 +3,7 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiTake } from '../api';
 import { fmtDuration, fmtRelative, fmtBytes } from '../data';
 import { coverGradient } from '../cover';
+import { Comments } from './Comments';
 
 type Slot = 'A' | 'B';
 
@@ -78,11 +79,13 @@ export function Project() {
 
   // ---- share --------------------------------------------------------------
   const shareCurrent = async () => {
-    if (!id) return;
     const active_take = active === 'A' ? takeA : takeB;
     if (!active_take) return;
-    const url = `${window.location.origin}/p/${id}?t=${active_take.id}`;
     try {
+      // Mint a share token tied to just this take — recipient can play
+      // it (and comment if signed in) without seeing the rest of the
+      // project. Owner can revoke later by deleting the token.
+      const { url } = await api.createShare(active_take.id);
       if (navigator.share) {
         await navigator.share({ title: active_take.project, url });
       } else {
@@ -90,7 +93,7 @@ export function Project() {
         setCopied(true);
         setTimeout(() => setCopied(false), 1600);
       }
-    } catch {/* user cancel */}
+    } catch {/* user cancel or 401 */}
   };
 
   // ---- per-row interactions ----------------------------------------------
@@ -242,6 +245,14 @@ export function Project() {
           </>
         )}
       </div>
+
+      {(takeA || takeB) && (
+        <Comments
+          takeId={(active === 'A' ? takeA : takeB)!.id}
+          getCurrentTime={() => audioRef.current?.currentTime ?? null}
+          seekTo={(t) => { if (audioRef.current) audioRef.current.currentTime = t; }}
+        />
+      )}
 
       <h2 className="section-label" style={{ marginTop: 28 }}>
         takes ({takes.length})

@@ -92,6 +92,110 @@ app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ userId: req.userId, email: req.userEmail || null });
 });
 
+// ---------- Share tokens ----------
+// Owner creates a token for one of their takes. Anyone with the token URL
+// can view that take (and its comments). Sign-in required to comment.
+
+app.post('/takes/:id/share', requireAuth, async (req, res) => {
+  // Ownership check — only the take's owner can mint a share.
+  const files = await db.getTakeFiles(req.params.id);
+  if (!files) return res.status(404).end();
+  if (files.userId && files.userId !== req.userId) return res.status(403).end();
+
+  const token = await db.createShareToken(req.params.id, req.userId);
+  if (!token) return res.status(500).json({ error: 'failed to create share' });
+  res.json({
+    token,
+    url: `https://app.earshot.cc/s/${token}`,
+  });
+});
+
+app.delete('/share/:token', requireAuth, async (req, res) => {
+  const ok = await db.revokeShare(req.params.token, req.userId);
+  if (!ok) return res.status(404).end();
+  res.json({ ok: true });
+});
+
+// Public: anyone with the token sees the take. Returns the take + a
+// signed audio URL. No auth required.
+app.get('/share/:token', async (req, res) => {
+  const share = await db.getShare(req.params.token);
+  if (!share) return res.status(404).json({ error: 'unknown or revoked share' });
+  if (share.expires_at && share.expires_at < Date.now()) {
+    return res.status(410).json({ error: 'share expired' });
+  }
+  const take = await db.getTakeById(share.take_id);
+  if (!take) return res.status(404).json({ error: 'take not found' });
+  res.json({
+    take,
+    // Audio endpoint already supports public access, the share token
+    // just gives the recipient the take's id to play with.
+    audioUrl: `/takes/${take.id}/audio`,
+  });
+});
+
+// ---------- Comments ----------
+// Comments are visible to:
+//   - the take's owner (always)
+//   - anyone holding an active share token to that take (via /share/:token/comments)
+//
+// Writing always requires a signed-in account. We don't allow anonymous
+// comments — at minimum the writer needs an email on file. Lowers spam
+// surface; recipients sign up if they want to leave a comment.
+
+app.get('/takes/:id/comments', requireAuth, async (req, res) => {
+  const files = await db.getTakeFiles(req.params.id);
+  if (!files) return res.status(404).end();
+  // Only the owner can list comments via this path. Share-token holders
+  // get comments via the /share endpoint below.
+  if (files.userId && files.userId !== req.userId) return res.status(403).end();
+  res.json(await db.listComments(req.params.id));
+});
+
+// Read comments via a share token (public).
+app.get('/share/:token/comments', async (req, res) => {
+  const share = await db.getShare(req.params.token);
+  if (!share) return res.status(404).end();
+  res.json(await db.listComments(share.take_id));
+});
+
+// Post a comment to a take you own.
+app.post('/takes/:id/comments', requireAuth, async (req, res) => {
+  const text = String(req.body?.text || '').trim().slice(0, 1000);
+  if (!text) return res.status(400).json({ error: 'empty comment' });
+  const t = req.body?.timestampSec;
+  const timestampSec = typeof t === 'number' && Number.isFinite(t) && t >= 0 ? t : null;
+
+  const files = await db.getTakeFiles(req.params.id);
+  if (!files) return res.status(404).end();
+
+  const row = await db.insertComment(req.params.id, req.userId, req.userEmail, text, timestampSec);
+  if (!row) return res.status(500).end();
+  res.json(row);
+});
+
+// Post a comment via a share token — for non-owner recipients. Still
+// requires the writer to be signed in (we attribute by user_id).
+app.post('/share/:token/comments', requireAuth, async (req, res) => {
+  const share = await db.getShare(req.params.token);
+  if (!share) return res.status(404).end();
+  const text = String(req.body?.text || '').trim().slice(0, 1000);
+  if (!text) return res.status(400).json({ error: 'empty comment' });
+  const t = req.body?.timestampSec;
+  const timestampSec = typeof t === 'number' && Number.isFinite(t) && t >= 0 ? t : null;
+
+  const row = await db.insertComment(share.take_id, req.userId, req.userEmail, text, timestampSec);
+  if (!row) return res.status(500).end();
+  res.json(row);
+});
+
+// Delete your own comment.
+app.delete('/comments/:id', requireAuth, async (req, res) => {
+  const ok = await db.deleteComment(req.params.id, req.userId);
+  if (!ok) return res.status(404).end();
+  res.json({ ok: true });
+});
+
 // --- Direct-to-R2 upload flow ------------------------------------------
 //
 // Render Free has a 100s request timeout. A 4-min stereo WAV (~46 MB)

@@ -54,6 +54,32 @@ async function del(path: string): Promise<void> {
   if (!r.ok && r.status !== 404) throw new Error(`${path} → ${r.status}`);
 }
 
+export type ApiComment = {
+  id: string;
+  userId: string | null;
+  authorEmail: string | null;
+  text: string;
+  timestampSec: number | null;
+  createdAt: number;
+};
+
+export type ApiShare = { token: string; url: string };
+
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetch(BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+async function getNoAuth<T>(path: string): Promise<T> {
+  const r = await fetch(BASE + path);
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
 export const api = {
   base: BASE,
   projects:  () => get<ApiProject[]>('/projects'),
@@ -62,4 +88,23 @@ export const api = {
   setNote:   (takeId: string, note: string) =>
     patch<{ ok: true }>(`/takes/${takeId}`, { note }),
   remove:    (takeId: string) => del(`/takes/${takeId}`),
+
+  // Sharing
+  createShare: (takeId: string) =>
+    post<ApiShare>(`/takes/${takeId}/share`),
+  getShare:    (token: string) =>
+    getNoAuth<{ take: ApiTake & { opusFilename: string | null }; audioUrl: string }>(
+      `/share/${token}`,
+    ),
+
+  // Comments
+  listComments: (takeId: string) =>
+    get<ApiComment[]>(`/takes/${takeId}/comments`),
+  listShareComments: (token: string) =>
+    getNoAuth<ApiComment[]>(`/share/${token}/comments`),
+  addComment: (takeId: string, text: string, timestampSec: number | null) =>
+    post<ApiComment>(`/takes/${takeId}/comments`, { text, timestampSec }),
+  addShareComment: (token: string, text: string, timestampSec: number | null) =>
+    post<ApiComment>(`/share/${token}/comments`, { text, timestampSec }),
+  removeComment: (id: string) => del(`/comments/${id}`),
 };

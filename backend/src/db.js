@@ -126,6 +126,22 @@ function buildSqlite() {
     setOpusFilename(id, opusFilename) {
       db.prepare('UPDATE takes SET opus_filename = ? WHERE id = ?').run(opusFilename, id);
     },
+
+    // Share + comments aren't supported on sqlite — production uses Postgres.
+    async createShareToken() { throw new Error('share tokens require Postgres backend'); },
+    async getShare() { return null; },
+    async revokeShare() { return false; },
+    async getTakeById(id) {
+      const r = db.prepare(
+        'SELECT id, project, project_id AS projectId, duration_sec AS durationSec, ' +
+        'bytes, note, created_at AS createdAt, opus_filename AS opusFilename ' +
+        'FROM takes WHERE id = ?'
+      ).get(id);
+      return r || null;
+    },
+    async listComments() { return []; },
+    async insertComment() { throw new Error('comments require Postgres backend'); },
+    async deleteComment() { return false; },
   };
 }
 
@@ -274,6 +290,77 @@ function buildSupabase() {
     async setOpusFilename(id, opusFilename) {
       await pg('PATCH', `/takes?id=eq.${encodeURIComponent(id)}`,
         { body: { opus_filename: opusFilename } });
+    },
+
+    // ---------- share tokens ----------
+    async createShareToken(takeId, userId) {
+      const rows = await pg('POST', '/share_tokens', {
+        body: { take_id: takeId, created_by: userId, created_at: Date.now() },
+        headers: { Prefer: 'return=representation' },
+      });
+      return rows?.[0]?.token || null;
+    },
+    async getShare(token) {
+      const rows = await pg('GET',
+        `/share_tokens?select=token,take_id,created_by,expires_at` +
+        `&token=eq.${encodeURIComponent(token)}&limit=1`);
+      return rows?.[0] || null;
+    },
+    async revokeShare(token, userId) {
+      const rows = await pg('DELETE',
+        `/share_tokens?token=eq.${encodeURIComponent(token)}` +
+        `&created_by=eq.${encodeURIComponent(userId)}`,
+        { headers: { Prefer: 'return=representation' } });
+      return !!(rows && rows.length);
+    },
+    // For showing a take returned by a share token (no user-scoping).
+    async getTakeById(id) {
+      const rows = await pg('GET',
+        `/takes?select=id,project,project_id,duration_sec,bytes,note,created_at,opus_filename` +
+        `&id=eq.${encodeURIComponent(id)}&limit=1`);
+      if (!rows?.[0]) return null;
+      const r = rows[0];
+      return {
+        id: r.id, project: r.project, projectId: r.project_id,
+        durationSec: r.duration_sec, bytes: r.bytes, note: r.note ?? null,
+        createdAt: r.created_at, opusFilename: r.opus_filename ?? null,
+      };
+    },
+
+    // ---------- comments ----------
+    async listComments(takeId) {
+      const rows = await pg('GET',
+        `/comments?select=id,user_id,author_email,text,timestamp_sec,created_at` +
+        `&take_id=eq.${encodeURIComponent(takeId)}&order=created_at.asc`);
+      return (rows || []).map(r => ({
+        id: r.id,
+        userId: r.user_id,
+        authorEmail: r.author_email,
+        text: r.text,
+        timestampSec: r.timestamp_sec,
+        createdAt: r.created_at,
+      }));
+    },
+    async insertComment(takeId, userId, email, text, timestampSec) {
+      const rows = await pg('POST', '/comments', {
+        body: {
+          take_id: takeId,
+          user_id: userId,
+          author_email: email,
+          text,
+          timestamp_sec: timestampSec ?? null,
+          created_at: Date.now(),
+        },
+        headers: { Prefer: 'return=representation' },
+      });
+      return rows?.[0] || null;
+    },
+    async deleteComment(id, userId) {
+      const rows = await pg('DELETE',
+        `/comments?id=eq.${encodeURIComponent(id)}` +
+        `&user_id=eq.${encodeURIComponent(userId)}`,
+        { headers: { Prefer: 'return=representation' } });
+      return !!(rows && rows.length);
     },
   };
 }

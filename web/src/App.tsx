@@ -3,10 +3,26 @@ import { Library } from './screens/Library';
 import { Project } from './screens/Project';
 import { SignIn } from './screens/SignIn';
 import { Link as LinkPlugin } from './screens/Link';
+import { Shared } from './screens/Shared';
 import { AuthProvider, useAuth, signOut } from './auth';
+
+// Pages that must remain accessible without sign-in.
+function PublicShell() {
+  return (
+    <Routes>
+      <Route path="/s/:token" element={<Shared />} />
+    </Routes>
+  );
+}
 
 function Shell() {
   const auth = useAuth();
+
+  // Always evaluate public routes first so share links work for
+  // anyone — signed in or not.
+  if (window.location.pathname.startsWith('/s/')) {
+    return <PublicShell />;
+  }
 
   if (auth.kind === 'loading') {
     return <div className="app"><p className="empty">loading…</p></div>;
