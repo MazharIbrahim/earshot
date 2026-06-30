@@ -527,6 +527,27 @@ function buildSupabase() {
       });
     },
 
+    // ---------- access checks ----------
+    // Can this user read/write a take?  Owner: yes (asOwner).  Project
+    // member: yes (asMember + role).  Otherwise no.
+    async canAccessTake(takeId, userId, email) {
+      const rows = await pg('GET',
+        `/takes?select=user_id,project_id&id=eq.${encodeURIComponent(takeId)}&limit=1`);
+      if (!rows?.[0]) return { ok: false, code: 404 };
+      const { user_id: ownerId, project_id: projectId } = rows[0];
+      if (ownerId === userId) return { ok: true, asOwner: true, projectId };
+      // Membership check.
+      const filterParts = [`member_user_id.eq.${encodeURIComponent(userId)}`];
+      if (email) filterParts.push(`member_email.eq.${encodeURIComponent(email.toLowerCase())}`);
+      const mems = await pg('GET',
+        `/project_members?select=role` +
+        `&owner_user_id=eq.${encodeURIComponent(ownerId)}` +
+        `&project_id=eq.${encodeURIComponent(projectId)}` +
+        `&or=(${filterParts.join(',')})&limit=1`);
+      if (mems?.length) return { ok: true, asMember: true, role: mems[0].role, projectId };
+      return { ok: false, code: 403 };
+    },
+
     // ---------- free tier enforcement ----------
     // Number of distinct projects this user has takes in.
     async countUserProjects(userId) {

@@ -155,11 +155,10 @@ app.get('/share/:token', async (req, res) => {
 // surface; recipients sign up if they want to leave a comment.
 
 app.get('/takes/:id/comments', requireAuth, async (req, res) => {
-  const files = await db.getTakeFiles(req.params.id);
-  if (!files) return res.status(404).end();
-  // Only the owner can list comments via this path. Share-token holders
-  // get comments via the /share endpoint below.
-  if (files.userId && files.userId !== req.userId) return res.status(403).end();
+  // Allow the owner AND any collaborator on the project — same access
+  // rules as viewing the take itself.
+  const acc = await db.canAccessTake(req.params.id, req.userId, req.userEmail);
+  if (!acc.ok) return res.status(acc.code || 403).end();
   res.json(await db.listComments(req.params.id));
 });
 
@@ -170,15 +169,15 @@ app.get('/share/:token/comments', async (req, res) => {
   res.json(await db.listComments(share.take_id));
 });
 
-// Post a comment to a take you own.
+// Post a comment to a take you own OR are a member of.
 app.post('/takes/:id/comments', requireAuth, async (req, res) => {
   const text = String(req.body?.text || '').trim().slice(0, 1000);
   if (!text) return res.status(400).json({ error: 'empty comment' });
   const t = req.body?.timestampSec;
   const timestampSec = typeof t === 'number' && Number.isFinite(t) && t >= 0 ? t : null;
 
-  const files = await db.getTakeFiles(req.params.id);
-  if (!files) return res.status(404).end();
+  const acc = await db.canAccessTake(req.params.id, req.userId, req.userEmail);
+  if (!acc.ok) return res.status(acc.code || 403).end();
 
   const row = await db.insertComment(req.params.id, req.userId, req.userEmail, text, timestampSec);
   if (!row) return res.status(500).end();
