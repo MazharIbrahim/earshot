@@ -246,11 +246,17 @@ export function Project() {
         )}
       </div>
 
-      {(takeA || takeB) && (
+      {activeTake && (
         <Comments
-          takeId={(active === 'A' ? takeA : takeB)!.id}
-          getCurrentTime={() => audioRef.current?.currentTime ?? null}
-          seekTo={(t) => { if (audioRef.current) audioRef.current.currentTime = t; }}
+          takeId={activeTake.id}
+          getCurrentTime={() => {
+            const ref = active === 'A' ? audioA : audioB;
+            return ref.current?.currentTime ?? null;
+          }}
+          seekTo={(t) => {
+            const ref = active === 'A' ? audioA : audioB;
+            if (ref.current) ref.current.currentTime = t;
+          }}
         />
       )}
 
