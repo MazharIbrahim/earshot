@@ -1,10 +1,12 @@
 import { Routes, Route, Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 import { Library } from './screens/Library';
 import { Project } from './screens/Project';
 import { SignIn } from './screens/SignIn';
 import { Link as LinkPlugin } from './screens/Link';
 import { Shared } from './screens/Shared';
 import { AuthProvider, useAuth, signOut } from './auth';
+import { api } from './api';
 
 // Pages that must remain accessible without sign-in.
 function PublicShell() {
@@ -34,19 +36,32 @@ function Shell() {
 
   const email = auth.session.user.email ?? '';
   const handle = email.split('@')[0];
+  const [tier, setTier] = useState<'free' | 'pro' | 'studio' | null>(null);
+  useEffect(() => {
+    api.profile().then(p => setTier(p.tier)).catch(() => setTier('free'));
+  }, []);
 
   return (
     <div className="app">
       <header className="topbar">
         <Link to="/" className="wordmark">EARSHOT</Link>
-        <button
-          onClick={() => { signOut(); }}
-          className="chip"
-          title={`signed in as ${email} · click to sign out`}
-          style={{ cursor: 'pointer' }}
-        >
-          {handle}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {tier && tier !== 'free' && (
+            <span className="chip" style={{
+              background: 'color-mix(in srgb, var(--accent) 20%, transparent)',
+              color: 'var(--accent)',
+              borderColor: 'color-mix(in srgb, var(--accent) 40%, var(--stroke))',
+            }}>{tier}</span>
+          )}
+          <button
+            onClick={() => { signOut(); }}
+            className="chip"
+            title={`signed in as ${email} · click to sign out`}
+            style={{ cursor: 'pointer' }}
+          >
+            {handle}
+          </button>
+        </div>
       </header>
 
       <Routes>

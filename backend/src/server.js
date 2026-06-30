@@ -104,9 +104,19 @@ app.post('/takes/:id/share', requireAuth, async (req, res) => {
 
   const token = await db.createShareToken(req.params.id, req.userId);
   if (!token) return res.status(500).json({ error: 'failed to create share' });
+
+  // Optional: also drop it in the recipient's inbox so they see it
+  // in their library, not just via the URL.
+  const recipientEmail = String(req.body?.recipientEmail || '').trim().toLowerCase();
+  if (recipientEmail.includes('@')) {
+    try { await db.addShareRecipient(token, recipientEmail); }
+    catch (e) { console.warn('[earshot] add share recipient:', e.message); }
+  }
+
   res.json({
     token,
     url: `https://app.earshot.cc/s/${token}`,
+    recipientEmail: recipientEmail.includes('@') ? recipientEmail : null,
   });
 });
 
@@ -196,6 +206,111 @@ app.delete('/comments/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Profile / tier ----------
+//
+// Profiles are lazily created on first /profile call. Tier upgrades come
+// from a (future) Stripe webhook; for now everyone is 'free'.
+app.get('/profile', requireAuth, async (req, res) => {
+  let prof = await db.getProfile(req.userId);
+  if (!prof) {
+    await db.upsertProfile(req.userId, req.userEmail || null);
+    prof = await db.getProfile(req.userId);
+    // Newly visible profile — backfill any pending member invites.
+    if (req.userEmail) {
+      await db.claimPendingMemberships(req.userId, req.userEmail);
+    }
+  }
+  res.json(prof);
+});
+
+// ---------- Free-tier enforcement (soft) ----------
+// Currently: max 3 active projects. Anything else (retention, take size)
+// is informational on the client side until we wire it server-side.
+const FREE_TIER_PROJECT_CAP = 3;
+
+async function isWithinTierLimits(userId, projectSlug) {
+  const prof = await db.getProfile(userId);
+  if (prof && prof.tier !== 'free') return { ok: true };
+
+  // Free users get up to N distinct projects. Once they have N, they
+  // can keep adding takes to existing ones but not create a new one.
+  const existing = await db.countUserProjects(userId);
+  // Adding a take to an EXISTING project doesn't count as "new".
+  const projects = (await db.allTakes()).filter(t => /* same user check happens implicitly via DB scoping */ true);
+  // Easier check: do they already have any take in this slug?
+  const rows = await (async () => {
+    try {
+      const r = await fetch(
+        `${process.env.SUPABASE_URL}/rest/v1/takes?select=id&user_id=eq.${encodeURIComponent(userId)}&project_id=eq.${encodeURIComponent(projectSlug)}&limit=1`,
+        { headers: {
+          apikey: process.env.SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+        }});
+      return r.ok ? await r.json() : [];
+    } catch { return []; }
+  })();
+  if (rows.length > 0) return { ok: true }; // existing project, no problem
+  if (existing >= FREE_TIER_PROJECT_CAP) {
+    return { ok: false, reason: `Free tier limited to ${FREE_TIER_PROJECT_CAP} projects. Upgrade to Pro for unlimited.` };
+  }
+  return { ok: true };
+}
+
+// Limit check is invoked from the multipart-init handler directly,
+// see isWithinTierLimits there.
+
+
+// ---------- Project members (collaborators) ----------
+app.get('/projects/:id/members', requireAuth, async (req, res) => {
+  // List members for a project the user owns.
+  res.json(await db.listProjectMembers(req.userId, req.params.id));
+});
+
+app.post('/projects/:id/members', requireAuth, async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const role = ['viewer', 'commenter', 'editor'].includes(req.body?.role)
+    ? req.body.role : 'viewer';
+  if (!email.includes('@')) return res.status(400).json({ error: 'invalid email' });
+  const row = await db.addProjectMember(req.userId, req.params.id, email, role);
+
+  // Best-effort: if a user with this email already exists, attach their
+  // user_id immediately so the invite is "live" without needing a sign-in.
+  try {
+    const r = await fetch(
+      `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
+      { headers: { apikey: process.env.SUPABASE_SERVICE_KEY,
+                   Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}` }});
+    if (r.ok) {
+      const body = await r.json();
+      const u = body.users?.[0] || body[0];
+      if (u?.id) {
+        await db.claimPendingMemberships(u.id, email);
+      }
+    }
+  } catch {/* non-fatal */}
+
+  res.json(row);
+});
+
+app.delete('/projects/:id/members/:email', requireAuth, async (req, res) => {
+  const ok = await db.removeProjectMember(req.userId, req.params.id,
+                                          decodeURIComponent(req.params.email));
+  if (!ok) return res.status(404).end();
+  res.json({ ok: true });
+});
+
+// ---------- Shared-with-me inbox ----------
+// Returns the share tokens addressed to the user's email — basically the
+// list of takes someone else made and pointed at this user.
+app.get('/shared-with-me', requireAuth, async (req, res) => {
+  if (!req.userEmail) return res.json([]);
+  // Also claim any pending project memberships waiting on this email.
+  await db.claimPendingMemberships(req.userId, req.userEmail);
+  res.json(await db.listInbox(req.userEmail));
+});
+
+// Share recipient is handled inline in POST /takes/:id/share above.
+
 // --- Direct-to-R2 upload flow ------------------------------------------
 //
 // Render Free has a 100s request timeout. A 4-min stereo WAV (~46 MB)
@@ -280,6 +395,12 @@ app.post('/takes/multipart/init', requireAuth, async (req, res) => {
         projectId: existing.projectId, durationSec: existing.durationSec,
       });
     }
+  }
+
+  // Free tier: 3 projects max. Skip if env opts out (useful for tests).
+  if ((process.env.EARSHOT_ENFORCE_TIER || 'on').toLowerCase() !== 'off') {
+    const check = await isWithinTierLimits(req.userId, projectId);
+    if (!check.ok) return res.status(402).json({ error: check.reason });
   }
 
   const takeId = nanoid();

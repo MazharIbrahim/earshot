@@ -362,6 +362,129 @@ function buildSupabase() {
         { headers: { Prefer: 'return=representation' } });
       return !!(rows && rows.length);
     },
+
+    // ---------- project collaborators ----------
+    async listProjectMembers(ownerUserId, projectId) {
+      const rows = await pg('GET',
+        `/project_members?select=member_email,member_user_id,role,invited_at` +
+        `&owner_user_id=eq.${encodeURIComponent(ownerUserId)}` +
+        `&project_id=eq.${encodeURIComponent(projectId)}`);
+      return (rows || []).map(r => ({
+        email: r.member_email,
+        userId: r.member_user_id,
+        role: r.role,
+        invitedAt: r.invited_at,
+      }));
+    },
+    async addProjectMember(ownerUserId, projectId, email, role) {
+      const rows = await pg('POST', '/project_members', {
+        body: {
+          owner_user_id: ownerUserId,
+          project_id: projectId,
+          member_email: email.toLowerCase(),
+          role: role || 'viewer',
+          invited_at: Date.now(),
+        },
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      });
+      return rows?.[0] || null;
+    },
+    async removeProjectMember(ownerUserId, projectId, email) {
+      const rows = await pg('DELETE',
+        `/project_members?owner_user_id=eq.${encodeURIComponent(ownerUserId)}` +
+        `&project_id=eq.${encodeURIComponent(projectId)}` +
+        `&member_email=eq.${encodeURIComponent(email.toLowerCase())}`,
+        { headers: { Prefer: 'return=representation' } });
+      return !!(rows && rows.length);
+    },
+    // Returns projects the user has been invited to as a member (not owned).
+    async listSharedProjects(userId, email) {
+      const rows = await pg('GET',
+        `/project_members?select=owner_user_id,project_id,role` +
+        `&or=(member_user_id.eq.${encodeURIComponent(userId)},` +
+        `lower(member_email).eq.${encodeURIComponent(email.toLowerCase())})`);
+      return (rows || []).map(r => ({
+        ownerUserId: r.owner_user_id,
+        projectId: r.project_id,
+        role: r.role,
+      }));
+    },
+    // When a user signs in, claim any pending email-only invites by
+    // backfilling their user_id.
+    async claimPendingMemberships(userId, email) {
+      try {
+        await pg('PATCH',
+          `/project_members?lower(member_email).eq.${encodeURIComponent(email.toLowerCase())}` +
+          `&member_user_id=is.null`,
+          { body: { member_user_id: userId } });
+      } catch {/* best effort */}
+    },
+
+    // ---------- share recipients (shared-with-me inbox) ----------
+    async addShareRecipient(token, email) {
+      const rows = await pg('POST', '/share_recipients', {
+        body: { token, invited_email: email.toLowerCase(), invited_at: Date.now() },
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      });
+      return rows?.[0] || null;
+    },
+    async listInbox(email) {
+      // Get share tokens addressed to this email + their take metadata.
+      const rows = await pg('GET',
+        `/share_recipients?select=token,share_tokens(token,take_id,created_by,created_at,takes(id,project,project_id,duration_sec,bytes,note,created_at))` +
+        `&lower(invited_email)=eq.${encodeURIComponent(email.toLowerCase())}` +
+        `&order=invited_at.desc`);
+      return (rows || [])
+        .filter(r => r.share_tokens && r.share_tokens.takes)
+        .map(r => ({
+          token: r.token,
+          take: {
+            id: r.share_tokens.takes.id,
+            project: r.share_tokens.takes.project,
+            projectId: r.share_tokens.takes.project_id,
+            durationSec: r.share_tokens.takes.duration_sec,
+            bytes: r.share_tokens.takes.bytes,
+            note: r.share_tokens.takes.note,
+            createdAt: r.share_tokens.takes.created_at,
+          },
+        }));
+    },
+
+    // ---------- profile / tier ----------
+    async getProfile(userId) {
+      const rows = await pg('GET',
+        `/profiles?select=user_id,email,tier,stripe_customer_id,pro_since,created_at` +
+        `&user_id=eq.${encodeURIComponent(userId)}&limit=1`);
+      if (!rows?.[0]) return null;
+      const r = rows[0];
+      return {
+        userId: r.user_id, email: r.email, tier: r.tier,
+        stripeCustomerId: r.stripe_customer_id, proSince: r.pro_since,
+        createdAt: r.created_at,
+      };
+    },
+    async upsertProfile(userId, email) {
+      const rows = await pg('POST', '/profiles', {
+        body: { user_id: userId, email, tier: 'free' },
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      });
+      return rows?.[0] || null;
+    },
+    async setProfileTier(userId, tier, extra = {}) {
+      await pg('PATCH', `/profiles?user_id=eq.${encodeURIComponent(userId)}`, {
+        body: { tier, ...extra },
+      });
+    },
+
+    // ---------- free tier enforcement ----------
+    // Number of distinct projects this user has takes in.
+    async countUserProjects(userId) {
+      const rows = await pg('GET',
+        `/takes?select=project_id&user_id=eq.${encodeURIComponent(userId)}`);
+      const set = new Set();
+      for (const r of rows || []) set.add(r.project_id);
+      return set.size;
+    },
   };
 }
 

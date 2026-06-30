@@ -4,6 +4,7 @@ import { api, ApiTake } from '../api';
 import { fmtDuration, fmtRelative, fmtBytes } from '../data';
 import { coverGradient } from '../cover';
 import { Comments } from './Comments';
+import { Members } from './Members';
 
 type Slot = 'A' | 'B';
 
@@ -245,6 +246,8 @@ export function Project() {
           </>
         )}
       </div>
+
+      {id && <Members projectId={id} />}
 
       {activeTake && (
         <Comments

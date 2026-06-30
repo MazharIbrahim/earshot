@@ -107,4 +107,28 @@ export const api = {
   addShareComment: (token: string, text: string, timestampSec: number | null) =>
     post<ApiComment>(`/share/${token}/comments`, { text, timestampSec }),
   removeComment: (id: string) => del(`/comments/${id}`),
+
+  // Share with optional recipient email — drops the take in their inbox.
+  createShareWithRecipient: (takeId: string, recipientEmail?: string) =>
+    post<ApiShare & { recipientEmail: string | null }>(
+      `/takes/${takeId}/share`, { recipientEmail: recipientEmail || null }),
+
+  // Profile + tier
+  profile: () => get<{
+    userId: string; email: string | null;
+    tier: 'free' | 'pro' | 'studio';
+    stripeCustomerId: string | null; proSince: number | null;
+  }>('/profile'),
+
+  // Collaborators
+  listMembers: (projectId: string) =>
+    get<{ email: string; userId: string | null; role: string; invitedAt: number }[]>
+      (`/projects/${projectId}/members`),
+  addMember: (projectId: string, email: string, role = 'viewer') =>
+    post(`/projects/${projectId}/members`, { email, role }),
+  removeMember: (projectId: string, email: string) =>
+    del(`/projects/${projectId}/members/${encodeURIComponent(email)}`),
+
+  // Shared-with-me inbox
+  inbox: () => get<{ token: string; take: ApiTake }[]>('/shared-with-me'),
 };
