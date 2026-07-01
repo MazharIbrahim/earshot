@@ -851,7 +851,16 @@ app.get('/takes/:id/audio', async (req, res) => {
   const files = await db.getTakeFiles(req.params.id);
   if (!files) return res.status(404).end();
 
-  const wantWav = req.query.format === 'wav';
+  let wantWav = req.query.format === 'wav';
+  // WAV download is a Pro feature. Free accounts silently get the Opus.
+  // We don't 402 here because ?format=wav is used from a click-through
+  // download link; degrading is friendlier than an error page.
+  if (wantWav && files.userId) {
+    try {
+      const prof = await db.getProfile(files.userId);
+      if (!prof || prof.tier === 'free') wantWav = false;
+    } catch {/* fall through with opus */}
+  }
   const filename = !wantWav && files.opusFilename ? files.opusFilename : files.filename;
   const isOpus = filename.endsWith('.opus');
 

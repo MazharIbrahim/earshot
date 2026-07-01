@@ -40,7 +40,10 @@ export function Members({ projectId, projectName, ownerOnly }: {
       setEmail('');
       load();
     } catch (e: any) {
-      setErr(e.message?.includes('400') ? 'invalid email' : 'failed to add');
+      const msg = String(e.message || '');
+      if (msg.includes('402')) setErr('collaborators are a Pro feature — upgrade above to invite');
+      else if (msg.includes('400')) setErr('invalid email');
+      else setErr('failed to add');
     } finally {
       setBusy(false);
     }
