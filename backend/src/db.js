@@ -400,12 +400,36 @@ function buildSupabase() {
       });
       return rows?.[0] || null;
     },
-    async deleteComment(id, userId) {
-      const rows = await pg('DELETE',
-        `/comments?id=eq.${encodeURIComponent(id)}` +
-        `&user_id=eq.${encodeURIComponent(userId)}`,
-        { headers: { Prefer: 'return=representation' } });
-      return !!(rows && rows.length);
+    // Two delete paths:
+    //   - author deleting their own comment
+    //   - take owner moderating any comment on their take
+    // A collaborator (not author, not take owner) can never delete.
+    async deleteComment(id, callerUserId) {
+      // First look up the comment + its take's owner in one round trip.
+      const rows = await pg('GET',
+        `/comments?select=id,user_id,take_id&id=eq.${encodeURIComponent(id)}&limit=1`);
+      if (!rows?.[0]) return false;
+      const c = rows[0];
+
+      // Author path.
+      if (c.user_id === callerUserId) {
+        const del = await pg('DELETE',
+          `/comments?id=eq.${encodeURIComponent(id)}`,
+          { headers: { Prefer: 'return=representation' } });
+        return !!(del && del.length);
+      }
+
+      // Take owner path — look up the take's owner.
+      const t = await pg('GET',
+        `/takes?select=user_id&id=eq.${encodeURIComponent(c.take_id)}&limit=1`);
+      if (t?.[0]?.user_id === callerUserId) {
+        const del = await pg('DELETE',
+          `/comments?id=eq.${encodeURIComponent(id)}`,
+          { headers: { Prefer: 'return=representation' } });
+        return !!(del && del.length);
+      }
+
+      return false; // collaborator or unrelated user — no delete
     },
 
     // ---------- project collaborators ----------
